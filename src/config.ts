@@ -44,7 +44,7 @@ const EnvSchema = z.object({
   ALLOWED_ORIGINS: z
     .string()
     .default('https://hyc.ac,http://localhost:8000,http://127.0.0.1:8000'),
-  RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(10),
+  RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(30),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(600_000),
   CONCURRENCY_LIMIT: z.coerce.number().int().min(1).max(64).default(4),
   QUEUE_LIMIT: z.coerce.number().int().min(0).max(256).default(10),
