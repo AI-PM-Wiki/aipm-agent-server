@@ -8,8 +8,8 @@
 #   1. cp .env.example .env,填 ANTHROPIC_API_KEY 与 TUNNEL_TOKEN
 #   2. docker compose up -d --build
 #   3. Cloudflare Zero Trust → Networks → Tunnels:建隧道拿 token,
-#      public hostname 配 docs-agent.hyc.ac → http://agent-server:8787
-#   4. curl https://docs-agent.hyc.ac/healthz 验证
+#      public hostname 配 docs-agent.nvc.ac → http://agent-server:8787
+#   4. curl https://docs-agent.nvc.ac/healthz 验证
 #
 # 注意:TRUST_PROXY 必须为 true(限流取 cf-connecting-ip 真实客户端 IP,
 #   否则所有请求都来自 127.0.0.1,限流失效)。

@@ -94,9 +94,9 @@ docker compose up -d --build
 ```
 
 - **HTTPS/域名**:Cloudflare Zero Trust → Networks → Tunnels 建隧道,拿 token 填
-  `.env` 的 `TUNNEL_TOKEN`;public hostname 配 `docs-agent.hyc.ac` →
+  `.env` 的 `TUNNEL_TOKEN`;public hostname 配 `docs-agent.nvc.ac` →
   `http://agent-server:8787`(compose 内网服务名)。HTTPS 由 Cloudflare 边缘
-  终止,证书自动;`docs-agent.hyc.ac` 域名在 Cloudflare 侧托管。
+  终止,证书自动;`docs-agent.nvc.ac` 域名在 Cloudflare 侧托管。
 - **端口**:compose 只绑 `127.0.0.1:8787`,公网不暴露任何端口;DDoS/缓存归
   Cloudflare 管。
 - **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持——隧道下所有请求从本机
@@ -105,4 +105,4 @@ docker compose up -d --build
   127.0.0.1 上失效。
 - **成本护栏是进程内状态**:单实例假设,限流/并发信号量随实例走,扩容需改
   共享存储(Redis 等);并发上限 4 对应 SDK 子进程数。
-- 验证:`curl https://docs-agent.hyc.ac/healthz` → `{ok, indexDocs, stale, ...}`。
+- 验证:`curl https://docs-agent.nvc.ac/healthz` → `{ok, indexDocs, stale, ...}`。
