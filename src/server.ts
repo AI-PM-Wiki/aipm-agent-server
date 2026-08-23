@@ -56,9 +56,13 @@ export function createApp(deps: ServerDeps) {
 
   function clientIp(req: IncomingMessage): string {
     if (config.trustProxy) {
-      const forwarded = req.headers['fly-client-ip'];
-      if (typeof forwarded === 'string' && forwarded.length > 0) {
-        return forwarded.split(',')[0]!.trim();
+      // 部署形态不同,真实客户端 IP 所在头不同:
+      //   Fly 代理 → fly-client-ip;Cloudflare 隧道(本机 cloudflared)→ cf-connecting-ip
+      for (const header of ['fly-client-ip', 'cf-connecting-ip'] as const) {
+        const forwarded = req.headers[header];
+        if (typeof forwarded === 'string' && forwarded.length > 0) {
+          return forwarded.split(',')[0]!.trim();
+        }
       }
     }
     const addr = req.socket.remoteAddress;

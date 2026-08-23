@@ -82,21 +82,27 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 - 日志不含原始 IP 与明文 prompt(限流事件只记 IP 的 sha256 前缀)。
 - 首次启动需要能访问 `SEARCH_INDEX_URL`;SDK 需要能访问 Anthropic API(或配置代理)。
 
-## 部署(fly.io)
+## 部署(美西 VPS:Docker Compose + Cloudflare 隧道)
 
-仓库自带 `Dockerfile` + `fly.toml`(也可在任意支持 Docker 的 VPS 上跑):
+仓库自带 `Dockerfile` + `docker-compose.yml`(agent-server + cloudflared 双容器):
 
 ```bash
+# VPS 上:装 docker + compose 插件;拉取或拷贝本仓库
 cd agent-server
-fly launch --no-deploy --name aipm-agent-server   # 或 flyctl launch --no-deploy
-fly secrets set ANTHROPIC_API_KEY=xxx             # 必填密钥(其余环境变量走 [env]/默认值)
-fly deploy
+cp .env.example .env          # 填 ANTHROPIC_API_KEY 与 TUNNEL_TOKEN
+docker compose up -d --build
 ```
 
-- 前端 widget 生产环境请求 `https://docs-agent.hyc.ac`(见 `docs/_static/js/chat-widget.js`
-  的 `API_BASE`),需为该域名加 CNAME 到 `<app>.fly.dev`,Fly 自动签发证书;
-  `ALLOWED_ORIGINS` 保持默认(`https://hyc.ac` + localhost),非浏览器请求不受限。
-- `fly.toml` 已置 `TRUST_PROXY=true`(限流取 `Fly-Client-IP`)与 `/healthz` 健康检查;
-  单机常驻(`auto_stop_machines = "off"`)避免首包冷启动。
-- 扩容:同一 key 下 `fly machines scale count 2` 即可,但限流/信号量随之变为
-  每实例独立计数(单实例假设),需要严格护栏时保持单实例。
+- **HTTPS/域名**:Cloudflare Zero Trust → Networks → Tunnels 建隧道,拿 token 填
+  `.env` 的 `TUNNEL_TOKEN`;public hostname 配 `docs-agent.hyc.ac` →
+  `http://agent-server:8787`(compose 内网服务名)。HTTPS 由 Cloudflare 边缘
+  终止,证书自动;`docs-agent.hyc.ac` 域名在 Cloudflare 侧托管。
+- **端口**:compose 只绑 `127.0.0.1:8787`,公网不暴露任何端口;DDoS/缓存归
+  Cloudflare 管。
+- **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持——隧道下所有请求从本机
+  cloudflared 进入,真实客户端 IP 在 `cf-connecting-ip` 头(server.ts 的
+  clientIp 同时支持 fly-client-ip 与 cf-connecting-ip),否则限流全打在
+  127.0.0.1 上失效。
+- **成本护栏是进程内状态**:单实例假设,限流/并发信号量随实例走,扩容需改
+  共享存储(Redis 等);并发上限 4 对应 SDK 子进程数。
+- 验证:`curl https://docs-agent.hyc.ac/healthz` → `{ok, indexDocs, stale, ...}`。

@@ -1,0 +1,38 @@
+# AI-PM Agent Server 部署(美西 VPS:Docker Compose + Cloudflare 隧道)
+#
+# 拓扑:公网 → Cloudflare 边缘(HTTPS 终止)→ 隧道 → 本机 cloudflared 容器
+#       → http://agent-server:8787(compose 内网)。对外只绑回环端口,
+#       公网不暴露任何端口。
+#
+# 用法:
+#   1. cp .env.example .env,填 ANTHROPIC_API_KEY 与 TUNNEL_TOKEN
+#   2. docker compose up -d --build
+#   3. Cloudflare Zero Trust → Networks → Tunnels:建隧道拿 token,
+#      public hostname 配 docs-agent.hyc.ac → http://agent-server:8787
+#   4. curl https://docs-agent.hyc.ac/healthz 验证
+#
+# 注意:TRUST_PROXY 必须为 true(限流取 cf-connecting-ip 真实客户端 IP,
+#   否则所有请求都来自 127.0.0.1,限流失效)。
+
+services:
+  agent-server:
+    build: .
+    image: aipm-agent-server:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    # 无 ports:隧道出站连接 Cloudflare,不需要入站端口
