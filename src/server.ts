@@ -9,7 +9,7 @@
  */
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { loadConfig } from './config.ts';
@@ -72,6 +72,14 @@ export function createApp(deps: ServerDeps) {
     return addr === undefined ? 'unknown' : addr;
   }
 
+  /** 常量时间字符串比较(API Key 校验,防时序侧信道;长度不同直接不等)。 */
+  function safeEqual(a: string, b: string): boolean {
+    const ab = Buffer.from(a);
+    const bb = Buffer.from(b);
+    if (ab.length !== bb.length) return false;
+    return timingSafeEqual(ab, bb);
+  }
+
   function writeJson(
     res: ServerResponse,
     status: number,
@@ -107,11 +115,18 @@ export function createApp(deps: ServerDeps) {
 
   async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = randomUUID();
+    // 响应侧异步写错误(连接销毁后的 EPIPE 类)兜底:有监听则不抛未捕获异常;
+    // 断连清理由下方 close 监听负责。
+    res.on('error', () => {});
     // 断连取消尽早接线:排队期间客户端关闭也要中止(不占槽位、不写响应)。
     // 注意必须监听响应侧 close 而非 req 的 close——IncomingMessage 'close'
     // 在请求体读完时就触发(Node 语义),监听 req 会把正常请求误判为断连。
     const abortController = new AbortController();
+    // 墙钟上限:MAX_RUN_MS 到点强制 abort(与客户端断连同一中止路径),防单轮挂死。
+    let runTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortedByTimer = false;
     res.once('close', () => {
+      if (runTimer !== null) clearTimeout(runTimer);
       if (!res.writableEnded) abortController.abort();
     });
     const origin = req.headers.origin;
@@ -127,7 +142,7 @@ export function createApp(deps: ServerDeps) {
     // API Key:仅对无 Origin 请求(curl/脚本/爬虫)强制校验;浏览器请求
     // 已被 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,
     // 本层防无差别扫描,针对性攻击由日预算护栏兜底。
-    if (config.apiKey && origin === undefined && req.headers['x-api-key'] !== config.apiKey) {
+    if (config.apiKey && origin === undefined && !safeEqual(req.headers['x-api-key'] ?? '', config.apiKey)) {
       sendError(req, res, 401, 'unauthorized', '缺少或错误的 X-API-Key', corsHeaders);
       return;
     }
@@ -186,7 +201,8 @@ export function createApp(deps: ServerDeps) {
     if (contentLength > config.bodyLimitBytes) {
       release();
       sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      req.destroy();
+      // 响应已 end,等 flush 后再销毁连接;直接 req.destroy() 会让响应字节丢失
+      res.destroySoon();
       return;
     }
     let overLimit = false;
@@ -222,7 +238,7 @@ export function createApp(deps: ServerDeps) {
     if (overLimit) {
       release();
       sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      req.destroy();
+      res.destroySoon();
       return;
     }
 
@@ -263,6 +279,13 @@ export function createApp(deps: ServerDeps) {
         JSON.stringify({ ts: new Date().toISOString(), requestId, ...extra }),
       );
 
+    // 墙钟上限:MAX_RUN_MS 到点 abort,防止单轮 agent 挂死(客户端断连也走同一
+    // abort 路径,靠 abortedByTimer 区分来源)。
+    runTimer = setTimeout(() => {
+      abortedByTimer = true;
+      abortController.abort();
+    }, config.maxRunMs);
+    runTimer.unref();
     const outcome = await runAgent({
       message: parsed.message,
       history,
@@ -291,10 +314,15 @@ export function createApp(deps: ServerDeps) {
         onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
       },
     });
+    if (runTimer !== null) {
+      clearTimeout(runTimer);
+      runTimer = null;
+    }
     stopHeartbeat();
     if (outcome.costUsd) budget.track(outcome.costUsd);
 
-    const closedByClient = abortController.signal.aborted;
+    const timedOut = abortedByTimer;
+    const closedByClient = abortController.signal.aborted && !timedOut;
     if (!closedByClient) {
       if (outcome.ok) {
         safeWrite('done', {
@@ -304,10 +332,16 @@ export function createApp(deps: ServerDeps) {
           numTurns: outcome.numTurns,
         });
         log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
+      } else if (timedOut) {
+        // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
+        safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });
+        log({ event: 'run_timeout', durationMs: outcome.durationMs, answerChars, thinkingChars });
       } else {
         const code: AgentErrorCode = outcome.code ?? 'internal';
-        safeWrite('error', { code, message: outcome.message ?? '未知错误' });
-        log({ event: 'error', code, message: outcome.message, costUsd: outcome.costUsd, durationMs: outcome.durationMs });
+        const message = outcome.message ?? '未知错误';
+        safeWrite('error', { code, message });
+        // message 可能含 SDK 异常/prompt 片段,日志只留前 200 字(承诺:日志不含明文 prompt)
+        log({ event: 'error', code, message: message.slice(0, 200), costUsd: outcome.costUsd, durationMs: outcome.durationMs });
       }
       if (!res.writableEnded) res.end();
     } else {
@@ -390,9 +424,9 @@ async function main(): Promise<void> {
   index.startAutoRefresh();
 
   const { server } = createApp({ config, index });
-  server.listen(config.port, () => {
+  server.listen(config.port, config.host, () => {
     console.log(
-      `[server] 就绪: http://127.0.0.1:${config.port}  ` +
+      `[server] 就绪: http://${config.host}:${config.port}  ` +
         `(docs=${index.getStats().docCount}, model=${config.model}, ` +
         `maxBudget=$ ${config.maxBudgetUsd}, maxTurns=${config.maxTurns})`,
     );
