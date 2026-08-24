@@ -30,6 +30,7 @@ export interface Config {
   bodyTimeoutMs: number;
   maxRunMs: number;
   trustProxy: boolean;
+  trustedProxyIps: string[];
   scratchDir: string;
 }
 
@@ -68,6 +69,10 @@ const EnvSchema = z.object({
   // 单轮问答墙钟上限(ms):到点强制 abort(与客户端断连同一中止路径),防 agent 挂死。
   MAX_RUN_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(120_000),
   TRUST_PROXY: z.string().default('false'),
+  // 可信代理 IP 列表(逗号分隔):仅当 TRUST_PROXY=true 且连接来自这些地址
+  // 时才读取 Fly-Client-IP / cf-connecting-ip 转发头;否则忽略转发头,防止
+  // 伪造头绕过每 IP 限流。默认仅回环(含 IPv6 形态 ::ffff:127.0.0.1)。
+  TRUSTED_PROXY_IPS: z.string().default('127.0.0.1,::1,::ffff:127.0.0.1'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
 });
 
@@ -109,6 +114,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     bodyTimeoutMs: e.BODY_TIMEOUT_MS,
     maxRunMs: e.MAX_RUN_MS,
     trustProxy: parseBool(e.TRUST_PROXY),
+    trustedProxyIps: e.TRUSTED_PROXY_IPS.split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
     scratchDir: e.SCRATCH_DIR,
   };
 }
