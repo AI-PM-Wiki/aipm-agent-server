@@ -35,15 +35,15 @@ const EnvSchema = z.object({
   EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
   MAX_BUDGET_USD: z.coerce.number().positive().default(0.3),
   MAX_TURNS: z.coerce.number().int().min(1).max(100).default(8),
-  SITE_BASE: z.string().url().default('https://hyc.ac/aipm'),
+  SITE_BASE: z.string().url().default('https://aipm.ac'),
   SEARCH_INDEX_URL: z
     .string()
     .url()
-    .default('https://hyc.ac/aipm/search/search_index.json'),
+    .default('https://aipm.ac/search/search_index.json'),
   INDEX_REFRESH_MS: z.coerce.number().int().min(10_000).default(1_800_000),
   ALLOWED_ORIGINS: z
     .string()
-    .default('https://hyc.ac,http://localhost:8000,http://127.0.0.1:8000'),
+    .default('https://aipm.ac,http://localhost:8000,http://127.0.0.1:8000'),
   RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(10),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(600_000),
   CONCURRENCY_LIMIT: z.coerce.number().int().min(1).max(64).default(4),

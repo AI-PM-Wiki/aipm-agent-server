@@ -54,7 +54,7 @@ export interface AgentInput {
 }
 
 /** 系统提示词:稳定、无时间戳。 */
-export const SYSTEM_PROMPT = `你是 AI-PM Wiki(https://hyc.ac/aipm/)的文档问答助手,只回答本站内容相关的问题。
+export const SYSTEM_PROMPT = `你是 AI-PM Wiki(https://aipm.ac/)的文档问答助手,只回答本站内容相关的问题。
 
 工作流程(必须遵守):
 1. 先用 mcp__wiki__search_wiki 检索站内文档,拿到候选页面;

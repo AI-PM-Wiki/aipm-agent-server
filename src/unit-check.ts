@@ -26,7 +26,7 @@ import { initSseResponse, writeSseEvent, startHeartbeat } from './sse.ts';
     end: () => {},
   } as unknown as import('node:http').ServerResponse & { _headers: Record<string, unknown> };
 
-  initSseResponse(res, { 'Access-Control-Allow-Origin': 'https://hyc.ac' });
+  initSseResponse(res, { 'Access-Control-Allow-Origin': 'https://aipm.ac' });
   check('SSE: Content-Type', res._headers['Content-Type'] === 'text/event-stream; charset=utf-8', String(res._headers['Content-Type']));
   writeSseEvent(res, 'ready', { requestId: 'abc' });
   writeSseEvent(res, 'delta', { text: '你好' });
@@ -65,9 +65,9 @@ function check(name: string, cond: boolean, detail = ''): void {
 
 // ---- 索引加载与检索 ----
 const index = new WikiIndex(
-  process.env['SEARCH_INDEX_URL'] ?? 'https://hyc.ac/aipm/search/search_index.json',
+  process.env['SEARCH_INDEX_URL'] ?? 'https://aipm.ac/search/search_index.json',
   0,
-  'https://hyc.ac/aipm',
+  'https://aipm.ac',
 );
 await index.load();
 {
@@ -79,7 +79,7 @@ await index.load();
   check('检索: 命中含 RAG 关键词', /rag/i.test(top1.title) || /rag/i.test(top1.snippet), top1.title);
   check('检索: snippet 无 HTML 标签', !top1.snippet.includes('<'), top1.snippet.slice(0, 40));
   check('检索: snippet ≤300 字', top1.snippet.length <= 300, `len=${top1.snippet.length}`);
-  check('检索: url 完整', top1.url.startsWith('https://hyc.ac/aipm/'), top1.url);
+  check('检索: url 完整', top1.url.startsWith('https://aipm.ac/'), top1.url);
 }
 
 // ---- 查询端停用词过滤 ----
@@ -125,7 +125,7 @@ await index.load();
 
 // ---- resolvePage ----
 {
-  const full = index.resolvePage('https://hyc.ac/aipm/ai/rag/');
+  const full = index.resolvePage('https://aipm.ac/ai/rag/');
   check('定位: 整页 URL → 命中', full !== null && full.text.length > 100, full?.title);
   check('定位: 整页含内容', (full?.text.length ?? 0) > 500, `len=${full?.text.length}`);
   const rel = index.resolvePage('ai/rag/');
@@ -134,13 +134,13 @@ await index.load();
   check('定位: 无尾斜杠兜底', noSlash !== null && noSlash.url.endsWith('ai/rag/'), noSlash?.url);
   const anchor = index.resolvePage('ai/rag/#rag-产品经理的评估视角');
   check('定位: 锚点节命中或回落整页', anchor !== null && anchor.text.length > 0, anchor?.title);
-  const encoded = index.resolvePage('https://hyc.ac/aipm/ai/rag/#rag-%E4%BA%A7%E5%93%81%E5%8C%96%E5%AE%9E%E6%88%98');
+  const encoded = index.resolvePage('https://aipm.ac/ai/rag/#rag-%E4%BA%A7%E5%93%81%E5%8C%96%E5%AE%9E%E6%88%98');
   check('定位: 百分号编码锚点兜底', encoded !== null, encoded?.title);
-  const root = index.resolvePage('https://hyc.ac/aipm');
+  const root = index.resolvePage('https://aipm.ac');
   check('定位: 站点根', root !== null && root.url.endsWith('/aipm/'), root?.url);
-  const missing = index.resolvePage('https://hyc.ac/aipm/no-such-page/');
+  const missing = index.resolvePage('https://aipm.ac/no-such-page/');
   check('定位: 不存在页面 → null', missing === null);
-  const longText = index.resolvePage('https://hyc.ac/aipm/case/teardown-chatgpt/');
+  const longText = index.resolvePage('https://aipm.ac/case/teardown-chatgpt/');
   check('定位: 超长页 ≤12000 字截断', (longText?.text.length ?? 999999) <= 12_050, `len=${longText?.text.length}`);
 }
 

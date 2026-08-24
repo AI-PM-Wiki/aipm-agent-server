@@ -1,6 +1,6 @@
 # AI-PM Agent Server
 
-AI-PM Wiki(https://hyc.ac/aipm)的文档问答 Agent 后端。纯静态 wiki 之上的一层问答服务:
+AI-PM Wiki(https://aipm.ac)的文档问答 Agent 后端。纯静态 wiki 之上的一层问答服务:
 BM25 站内检索 + Claude Agent SDK 驱动回答,SSE 流式输出。
 
 ## 架构
