@@ -1,6 +1,6 @@
 # AI-PM Agent Server
 
-AI-PM Wiki(https://aipm.ac)的文档问答 Agent 后端。纯静态 wiki 之上的一层问答服务:
+[AI-PM Wiki](https://aipm.ac)的文档问答 Agent 后端。纯静态 wiki 之上的一层问答服务:
 BM25 站内检索 + Claude Agent SDK 驱动回答,SSE 流式输出。
 
 ## 架构
@@ -85,7 +85,7 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 - 日志不含原始 IP 与明文 prompt(限流事件只记 IP 的 sha256 前缀)。
 - 首次启动需要能访问 `SEARCH_INDEX_URL`;SDK 需要能访问 Anthropic API(或配置代理)。
 
-## 部署(美西 VPS:Docker Compose + Cloudflare 隧道)
+## 部署(Docker Compose + Cloudflare 隧道)
 
 仓库自带 `Dockerfile` + `docker-compose.yml`(agent-server + cloudflared 双容器):
 
