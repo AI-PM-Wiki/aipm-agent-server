@@ -29,10 +29,11 @@ services:
       start_period: 15s
       retries: 3
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    # 无 ports:隧道出站连接 Cloudflare,不需要入站端口
+  # cloudflared 停用:本机隧道由系统级 cloudflared(ai-gateway 隧道,
+  # /etc/cloudflared/config.yml 本地 ingress)负责,无需 token 容器。
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
+  #   environment:
+  #     - TUNNEL_TOKEN=\${TUNNEL_TOKEN}
