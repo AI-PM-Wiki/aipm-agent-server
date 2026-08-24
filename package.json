@@ -5,10 +5,14 @@
   "description": "AI-PM Wiki 文档问答 Agent 后端:BM25 检索 + Claude Agent SDK 回答,SSE 流式输出",
   "type": "module",
   "main": "dist/server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "smoke": "tsx src/smoke-search.ts",
+    "unit-check": "tsx src/unit-check.ts",
     "cli": "tsx src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
