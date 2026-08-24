@@ -190,6 +190,13 @@ export function createApp(deps: ServerDeps) {
       return;
     }
     let overLimit = false;
+    let bodyTimedOut = false;
+    // 慢速 POST 防 DoS:body 读取超时(BODY_TIMEOUT_MS)后 destroy 连接,
+    // async 迭代随即抛错进入 catch,释放并发槽位。正常请求毫秒级读完,永不触发。
+    const bodyReadTimer = setTimeout(() => {
+      bodyTimedOut = true;
+      req.destroy();
+    }, config.bodyTimeoutMs);
     try {
       for await (const chunk of req) {
         body += chunk;
@@ -198,9 +205,18 @@ export function createApp(deps: ServerDeps) {
           break;
         }
       }
+      clearTimeout(bodyReadTimer);
     } catch {
+      clearTimeout(bodyReadTimer);
       release();
-      sendError(req, res, 400, 'bad_request', '读取请求体失败', corsHeaders);
+      sendError(
+        req,
+        res,
+        bodyTimedOut ? 408 : 400,
+        bodyTimedOut ? 'request_timeout' : 'bad_request',
+        bodyTimedOut ? '读取请求体超时' : '读取请求体失败',
+        corsHeaders,
+      );
       return;
     }
     if (overLimit) {

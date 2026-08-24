@@ -26,6 +26,7 @@ export interface Config {
   apiKey: string;
   dailyBudgetUsd: number;
   bodyLimitBytes: number;
+  bodyTimeoutMs: number;
   trustProxy: boolean;
   scratchDir: string;
 }
@@ -58,6 +59,8 @@ const EnvSchema = z.object({
   // 0 = 关闭;默认 1.4 ≈ ¥10/天(以实际账单为准可调)。
   DAILY_BUDGET_USD: z.coerce.number().min(0).default(1.4),
   BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(65_536),
+  // 请求体读取超时(ms):慢速 POST 拖住并发槽位的 DoS 兜底,超时断开并释放槽位。
+  BODY_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
   TRUST_PROXY: z.string().default('false'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
 });
@@ -96,6 +99,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiKey: e.API_KEY,
     dailyBudgetUsd: e.DAILY_BUDGET_USD,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
+    bodyTimeoutMs: e.BODY_TIMEOUT_MS,
     trustProxy: parseBool(e.TRUST_PROXY),
     scratchDir: e.SCRATCH_DIR,
   };
