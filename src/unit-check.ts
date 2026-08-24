@@ -73,7 +73,7 @@ const index = new WikiIndex(
 await index.load();
 {
   const stats = index.getStats();
-  check('索引加载: 887 条目', stats.docCount >= 800, `docs=${stats.docCount}`);
+  check(`索引加载: ${stats.docCount} 条目(≥800)`, stats.docCount >= 800, `docs=${stats.docCount}`);
   const hits = index.search('RAG 幻觉', 8);
   check('检索: RAG 幻觉 top8 非空', hits.length > 0, `top1=${hits[0]?.title}`);
   const top1 = hits[0]!;
@@ -133,12 +133,14 @@ await index.load();
   check('定位: 相对路径与整页一致', rel?.url === full?.url && rel?.text === full?.text, rel?.url);
   const noSlash = index.resolvePage('ai/rag');
   check('定位: 无尾斜杠兜底', noSlash !== null && noSlash.url.endsWith('ai/rag/'), noSlash?.url);
-  const anchor = index.resolvePage('ai/rag/#rag-产品经理的评估视角');
-  check('定位: 锚点节命中或回落整页', anchor !== null && anchor.text.length > 0, anchor?.title);
-  const encoded = index.resolvePage('https://aipm.ac/ai/rag/#rag-%E4%BA%A7%E5%93%81%E5%8C%96%E5%AE%9E%E6%88%98');
-  check('定位: 百分号编码锚点兜底', encoded !== null, encoded?.title);
+  // 线上索引分节条目的 location 为 "ai/rag/#产品经理的评估视角"(2026-08 核实,
+  // 无 "rag-" 前缀);resolvePage 应对锚点做精确命中而非回落整页。
+  const anchor = index.resolvePage('ai/rag/#产品经理的评估视角');
+  check('定位: 锚点节精确命中', anchor !== null && anchor.url === 'https://aipm.ac/ai/rag/#产品经理的评估视角' && anchor.text.length > 0, anchor?.url);
+  const encoded = index.resolvePage('https://aipm.ac/ai/rag/#%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86%E7%9A%84%E8%AF%84%E4%BC%B0%E8%A7%86%E8%A7%92');
+  check('定位: 百分号编码锚点兜底', encoded !== null && encoded.url === 'https://aipm.ac/ai/rag/#产品经理的评估视角', encoded?.url);
   const root = index.resolvePage('https://aipm.ac');
-  check('定位: 站点根', root !== null && root.url.endsWith('/aipm/'), root?.url);
+  check('定位: 站点根(location:"")', root !== null && root.url.startsWith('https://aipm.ac/') && root.url.endsWith('/'), root?.url);
   const missing = index.resolvePage('https://aipm.ac/no-such-page/');
   check('定位: 不存在页面 → null', missing === null);
   const longText = index.resolvePage('https://aipm.ac/case/teardown-chatgpt/');
