@@ -3,7 +3,8 @@
  *  - POST /api/chat  SSE 事件流(ready/sources/delta/done/error + 15s 心跳)
  *  - GET  /healthz   索引状态
  *  - OPTIONS         预检
- * 预校验失败返回纯 JSON:400 / 403(Origin)/ 413(体积)/ 429(限流)/ 503(并发满)。
+ * 预校验失败返回纯 JSON:400 / 401(API Key)/ 403(Origin)/ 413(体积)/
+ * 429(限流/日预算用尽)/ 503(并发满)。
  * 日志不含原始 IP 与明文 prompt。
  */
 import { createServer } from 'node:http';
@@ -18,6 +19,7 @@ import { runAgent } from './agent.ts';
 import type { AgentErrorCode } from './agent.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
+import { DailyBudget } from './budget.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
 
 const ChatBodySchema = z.object({
@@ -47,6 +49,7 @@ export function createApp(deps: ServerDeps) {
     queueLimit: config.queueLimit,
     waitMs: config.queueWaitMs,
   });
+  const budget = new DailyBudget(config.dailyBudgetUsd);
   const startedAt = Date.now();
 
   function originAllowed(origin: string | undefined): boolean {
@@ -118,6 +121,24 @@ export function createApp(deps: ServerDeps) {
     };
     if (origin !== undefined && !originAllowed(origin)) {
       sendError(req, res, 403, 'forbidden', 'Origin 不在白名单', corsHeaders);
+      return;
+    }
+
+    // API Key:仅对无 Origin 请求(curl/脚本/爬虫)强制校验;浏览器请求
+    // 已被 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,
+    // 本层防无差别扫描,针对性攻击由日预算护栏兜底。
+    if (config.apiKey && origin === undefined && req.headers['x-api-key'] !== config.apiKey) {
+      sendError(req, res, 401, 'unauthorized', '缺少或错误的 X-API-Key', corsHeaders);
+      return;
+    }
+
+    // 日预算护栏:耗尽则全局拒绝(跨日自动重置)。
+    if (budget.exhausted) {
+      console.log(
+        JSON.stringify({ ts: new Date().toISOString(), requestId, event: 'budget_exhausted', spentUsd: budget.spentUsd }),
+      );
+      const headers = { 'Retry-After': String(24 * 3600), ...corsHeaders };
+      sendError(req, res, 429, 'budget_exhausted', '今日问答预算已用完,请明天再试', headers);
       return;
     }
 
@@ -255,6 +276,7 @@ export function createApp(deps: ServerDeps) {
       },
     });
     stopHeartbeat();
+    if (outcome.costUsd) budget.track(outcome.costUsd);
 
     const closedByClient = abortController.signal.aborted;
     if (!closedByClient) {
@@ -265,7 +287,7 @@ export function createApp(deps: ServerDeps) {
           durationMs: outcome.durationMs,
           numTurns: outcome.numTurns,
         });
-        log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount });
+        log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
       } else {
         const code: AgentErrorCode = outcome.code ?? 'internal';
         safeWrite('error', { code, message: outcome.message ?? '未知错误' });

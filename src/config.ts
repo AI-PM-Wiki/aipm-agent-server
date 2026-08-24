@@ -23,6 +23,8 @@ export interface Config {
   concurrencyLimit: number;
   queueLimit: number;
   queueWaitMs: number;
+  apiKey: string;
+  dailyBudgetUsd: number;
   bodyLimitBytes: number;
   trustProxy: boolean;
   scratchDir: string;
@@ -49,6 +51,12 @@ const EnvSchema = z.object({
   CONCURRENCY_LIMIT: z.coerce.number().int().min(1).max(64).default(4),
   QUEUE_LIMIT: z.coerce.number().int().min(0).max(256).default(10),
   QUEUE_WAIT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
+  // 无 Origin 请求(curl/脚本)须携带 X-API-Key;留空 = 不校验。
+  // 浏览器请求由 Origin 白名单覆盖,不受此限。
+  API_KEY: z.string().default(''),
+  // 每日预算护栏(USD,按 SDK total_cost_usd 累计,UTC 日切,进程内状态):
+  // 0 = 关闭;默认 1.4 ≈ ¥10/天(以实际账单为准可调)。
+  DAILY_BUDGET_USD: z.coerce.number().min(0).default(1.4),
   BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(65_536),
   TRUST_PROXY: z.string().default('false'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
@@ -85,6 +93,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     concurrencyLimit: e.CONCURRENCY_LIMIT,
     queueLimit: e.QUEUE_LIMIT,
     queueWaitMs: e.QUEUE_WAIT_MS,
+    apiKey: e.API_KEY,
+    dailyBudgetUsd: e.DAILY_BUDGET_USD,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
     trustProxy: parseBool(e.TRUST_PROXY),
     scratchDir: e.SCRATCH_DIR,

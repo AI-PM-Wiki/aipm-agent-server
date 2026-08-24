@@ -43,6 +43,8 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `ALLOWED_ORIGINS` | 精确 Origin 白名单,逗号分隔,无通配符、无凭据 |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` / `CONCURRENCY_LIMIT` | 每 IP 滑动窗口限流 + 并发信号量(成本护栏) |
 | `QUEUE_LIMIT` / `QUEUE_WAIT_MS` | 并发满时排队深度(默认 10)与等待上限(默认 60s),超限 503 + Retry-After |
+| `API_KEY` | **无 Origin 请求**(curl/脚本/爬虫)须携带 `X-API-Key` 头,否则 401;留空 = 不校验。浏览器请求由 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,本层防无差别扫描,针对性攻击由日预算兜底 |
+| `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
 | `TRUST_PROXY` | 置 `true` 时从 `Fly-Client-IP` 取客户端 IP(否则 socket 地址) |
 
 ## 开发与运行

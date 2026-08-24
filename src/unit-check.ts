@@ -8,6 +8,7 @@
 import { WikiIndex, tokenize, normalizeText, filterQueryTokens } from './search.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, hashIp } from './rate-limit.ts';
+import { DailyBudget } from './budget.ts';
 import { initSseResponse, writeSseEvent, startHeartbeat } from './sse.ts';
 
 // ---- SSE 帧写入(用 stub ServerResponse) ----
@@ -199,6 +200,28 @@ await index.load();
   const r3 = await sem.acquire();
   check('信号量: 全部释放后可再取', typeof r3 === 'function' && sem.activeCount === 1);
   r3!();
+}
+
+// ---- 日预算护栏 ----
+{
+  const fixedNow = () => new Date('2026-08-24T00:00:00Z');
+  const b = new DailyBudget(1.4, fixedNow);
+  check('预算: 初始未超限', !b.exhausted);
+  check('预算: 初始剩余 = 预算', b.remainingUsd === 1.4, String(b.remainingUsd));
+  b.track(1.0);
+  check('预算: 消耗 1.0 未超限', !b.exhausted, `spent=${b.spentUsd}`);
+  b.track(0.5);
+  check('预算: 累计 1.5 超限', b.exhausted);
+  check('预算: 剩余按 0 截断', b.remainingUsd === 0, String(b.remainingUsd));
+  const closed = new DailyBudget(0, fixedNow);
+  check('预算: 0 = 关闭护栏', !closed.exhausted && closed.remainingUsd === Number.POSITIVE_INFINITY);
+  // 跨日自动重置
+  let nowFn = () => new Date('2026-08-24T15:00:00Z');
+  const rolling = new DailyBudget(1, () => nowFn());
+  rolling.track(1);
+  check('预算: 当日超限', rolling.exhausted);
+  nowFn = () => new Date('2026-08-25T00:00:00Z');
+  check('预算: 跨日自动重置', !rolling.exhausted && rolling.remainingUsd === 1, `spent=${rolling.spentUsd}`);
 }
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);
