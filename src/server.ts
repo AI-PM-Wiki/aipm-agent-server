@@ -16,7 +16,7 @@ import { loadConfig } from './config.ts';
 import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
-import type { AgentErrorCode } from './agent.ts';
+import type { AgentErrorCode, AgentOutcome } from './agent.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
@@ -57,8 +57,17 @@ export function createApp(deps: ServerDeps) {
     return config.allowedOrigins.includes(origin);
   }
 
+  /** 一次性告警标记:同一进程只打一次 warn,防刷屏。 */
+  let warnedUntrustedProxy = false;
+
+  /**
+   * 解析客户端 IP:仅当 TRUST_PROXY=true 且直连 socket 的远端地址属于
+   * TRUSTED_PROXY_IPS(可信代理)时才读取 Fly-Client-IP / cf-connecting-ip
+   * 转发头;否则一律忽略转发头、回落 socket 地址。若服务被直连暴露
+   * (HOST=0.0.0.0),攻击者伪造的转发头不会被采信,无法绕过每 IP 限流。
+   */
   function clientIp(req: IncomingMessage): string {
-    if (config.trustProxy) {
+    if (config.trustProxy && config.trustedProxyIps.includes(req.socket.remoteAddress ?? '')) {
       // 部署形态不同,真实客户端 IP 所在头不同:
       //   Fly 代理 → fly-client-ip;Cloudflare 隧道(本机 cloudflared)→ cf-connecting-ip
       for (const header of ['fly-client-ip', 'cf-connecting-ip'] as const) {
@@ -67,6 +76,16 @@ export function createApp(deps: ServerDeps) {
           return forwarded.split(',')[0]!.trim();
         }
       }
+    } else if (config.trustProxy && !warnedUntrustedProxy) {
+      warnedUntrustedProxy = true;
+      console.log(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          event: 'untrusted_proxy_ignored',
+          remoteAddrHash: hashIp(req.socket.remoteAddress ?? '').slice(0, 16),
+          hint: 'TRUST_PROXY=true 但远端地址不在 TRUSTED_PROXY_IPS,已忽略转发头',
+        }),
+      );
     }
     const addr = req.socket.remoteAddress;
     return addr === undefined ? 'unknown' : addr;
@@ -135,22 +154,30 @@ export function createApp(deps: ServerDeps) {
       Vary: 'Origin',
     };
     if (origin !== undefined && !originAllowed(origin)) {
-      sendError(req, res, 403, 'forbidden', 'Origin 不在白名单', corsHeaders);
+      // 不反射被拒的 Origin(#7):403 响应不带 Access-Control-Allow-Origin,
+      // 浏览器 CORS 校验失败、读不到 403 响应体,避免把非白名单 Origin 回显为
+      // 允许来源(鉴权模型保持现状:公开问答服务 + 预算护栏为主防线,
+      // Bearer 鉴权改造记 deferred)。
+      sendError(req, res, 403, 'forbidden', 'Origin 不在白名单', { Vary: 'Origin' });
       return;
     }
 
     // API Key:仅对无 Origin 请求(curl/脚本/爬虫)强制校验;浏览器请求
     // 已被 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,
     // 本层防无差别扫描,针对性攻击由日预算护栏兜底。
-    if (config.apiKey && origin === undefined && !safeEqual(req.headers['x-api-key'] ?? '', config.apiKey)) {
+    const apiKeyHeader = req.headers['x-api-key'];
+    if (config.apiKey && origin === undefined && !safeEqual(typeof apiKeyHeader === 'string' ? apiKeyHeader : '', config.apiKey)) {
       sendError(req, res, 401, 'unauthorized', '缺少或错误的 X-API-Key', corsHeaders);
       return;
     }
 
-    // 日预算护栏:耗尽则全局拒绝(跨日自动重置)。
-    if (budget.exhausted) {
+    // 日预算护栏:原子预占(检查+预占同一同步步骤,消除并发竞态窗口)。
+    // estimate = 单轮 agent 预算上限(MAX_BUDGET_USD),即理论最大单轮成本;
+    // 执行后按实际 costUsd 结算,后续各失败路径 release 释放(见各 return 前)。
+    const estimate = config.maxBudgetUsd;
+    if (!budget.tryReserve(estimate)) {
       console.log(
-        JSON.stringify({ ts: new Date().toISOString(), requestId, event: 'budget_exhausted', spentUsd: budget.spentUsd }),
+        JSON.stringify({ ts: new Date().toISOString(), requestId, event: 'budget_exhausted', spentUsd: budget.spentUsd, reservedUsd: budget.reservedUsd }),
       );
       const headers = { 'Retry-After': String(24 * 3600), ...corsHeaders };
       sendError(req, res, 429, 'budget_exhausted', '今日问答预算已用完,请明天再试', headers);
@@ -160,6 +187,7 @@ export function createApp(deps: ServerDeps) {
     const ip = clientIp(req);
     const ipKey = hashIp(ip);
     if (!limiter.tryAcquire(ipKey)) {
+      budget.release(estimate);
       const retryAfter = limiter.retryAfterSec();
       console.log(
         JSON.stringify({ ts: new Date().toISOString(), requestId, event: 'rate_limited', ipHash: ipKey.slice(0, 16) }),
@@ -175,7 +203,10 @@ export function createApp(deps: ServerDeps) {
     );
     if (!acquired.ok) {
       if (acquired.err instanceof SemaphoreError) {
-        if (acquired.err.code === 'aborted') return; // 客户端已断开,静默
+        if (acquired.err.code === 'aborted') {
+          budget.release(estimate);
+          return; // 客户端已断开,静默
+        }
         const retryAfter = acquired.err.code === 'queue_full' ? '10' : '1';
         const message =
           acquired.err.code === 'queue_full' ? '服务繁忙,请稍后再试' : '排队超时,请稍后再试';
@@ -189,9 +220,11 @@ export function createApp(deps: ServerDeps) {
           }),
         );
         const headers = { 'Retry-After': retryAfter, ...corsHeaders };
+        budget.release(estimate);
         sendError(req, res, 503, 'concurrency_limit', message, headers);
         return;
       }
+      budget.release(estimate);
       throw acquired.err;
     }
     const release = acquired.release;
@@ -199,10 +232,12 @@ export function createApp(deps: ServerDeps) {
     let body = '';
     const contentLength = Number(req.headers['content-length'] ?? 0);
     if (contentLength > config.bodyLimitBytes) {
+      budget.release(estimate);
       release();
       sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      // 响应已 end,等 flush 后再销毁连接;直接 req.destroy() 会让响应字节丢失
-      res.destroySoon();
+      // 响应已 end,等 flush 后再销毁连接;直接 req.destroy() 会让响应字节丢失。
+      // 注:ServerResponse.destroySoon 已被 Node17+ 移除,等价改用 socket.destroySoon。
+      res.socket?.destroySoon();
       return;
     }
     let overLimit = false;
@@ -224,6 +259,7 @@ export function createApp(deps: ServerDeps) {
       clearTimeout(bodyReadTimer);
     } catch {
       clearTimeout(bodyReadTimer);
+      budget.release(estimate);
       release();
       sendError(
         req,
@@ -236,9 +272,11 @@ export function createApp(deps: ServerDeps) {
       return;
     }
     if (overLimit) {
+      budget.release(estimate);
       release();
       sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      res.destroySoon();
+      // 同上:等 flush 后再销毁;ServerResponse.destroySoon 已移除,用 socket 版。
+      res.socket?.destroySoon();
       return;
     }
 
@@ -249,6 +287,7 @@ export function createApp(deps: ServerDeps) {
       parsed = null;
     }
     if (parsed === null) {
+      budget.release(estimate);
       release();
       sendError(req, res, 400, 'bad_request', '请求体格式不正确:需要 {message, history?}', corsHeaders);
       return;
@@ -286,40 +325,57 @@ export function createApp(deps: ServerDeps) {
       abortController.abort();
     }, config.maxRunMs);
     runTimer.unref();
-    const outcome = await runAgent({
-      message: parsed.message,
-      history,
-      config,
-      index,
-      signal: abortController.signal,
-      callbacks: {
-        onDelta: (text) => {
-          answerChars += text.length;
-          safeWrite('delta', { text });
+    let outcome: AgentOutcome | null = null;
+    try {
+      outcome = await runAgent({
+        message: parsed.message,
+        history,
+        config,
+        index,
+        signal: abortController.signal,
+        callbacks: {
+          onDelta: (text) => {
+            answerChars += text.length;
+            safeWrite('delta', { text });
+          },
+          onThinking: (text) => {
+            thinkingChars += text.length; // 只计数标记,不渲染
+          },
+          onSources: (evt) => {
+            sourcesCount++;
+            safeWrite('sources', {
+              query: evt.query,
+              results: evt.results.map(({ title, url, snippet }) => ({
+                title,
+                url,
+                snippet,
+              })),
+            });
+          },
+          onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
         },
-        onThinking: (text) => {
-          thinkingChars += text.length; // 只计数标记,不渲染
-        },
-        onSources: (evt) => {
-          sourcesCount++;
-          safeWrite('sources', {
-            query: evt.query,
-            results: evt.results.map(({ title, url, snippet }) => ({
-              title,
-              url,
-              snippet,
-            })),
-          });
-        },
-        onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
-      },
-    });
-    if (runTimer !== null) {
-      clearTimeout(runTimer);
-      runTimer = null;
+      });
+    } finally {
+      if (runTimer !== null) {
+        clearTimeout(runTimer);
+        runTimer = null;
+      }
+      stopHeartbeat();
+      if (outcome !== null) {
+        // 正常/业务失败返回:按实际成本结算并释放预占(costUsd 为 0/undefined
+        // 也走 settle——未产生费用同样要把预占全额转回可用量)。
+        budget.settle(estimate, outcome.costUsd ?? 0);
+      } else {
+        // runAgent 抛异常(理论路径,其内部已兜住绝大多数错误):释放预占后
+        // 向上传播,走 handler_crash 的既有销毁路径。
+        budget.release(estimate);
+      }
     }
-    stopHeartbeat();
-    if (outcome.costUsd) budget.track(outcome.costUsd);
+    if (outcome === null) {
+      // 不可达:runAgent 要么返回 outcome、要么抛异常(异常已在 finally 释放
+      // 预占后重新抛出)。此处防御性抛出,避免后续对 null 解引用。
+      throw new Error('runAgent 未返回结果');
+    }
 
     const timedOut = abortedByTimer;
     const closedByClient = abortController.signal.aborted && !timedOut;
