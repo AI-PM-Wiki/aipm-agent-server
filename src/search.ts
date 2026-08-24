@@ -303,7 +303,7 @@ export class WikiIndex {
   }
 
   /** 直接由解析后的条目构建(测试 / CLI 配置检查用)。 */
-  static fromDocs(docs: IndexDoc[], siteBase = 'https://hyc.ac/aipm'): WikiIndex {
+  static fromDocs(docs: IndexDoc[], siteBase = 'https://aipm.ac'): WikiIndex {
     const stub = new WikiIndex('', 0, siteBase);
     stub.replace(docs);
     return stub;
