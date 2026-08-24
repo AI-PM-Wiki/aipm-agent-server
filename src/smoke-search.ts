@@ -4,21 +4,25 @@
  * 零依赖(只 import search.ts),可用 `node src/smoke-search.ts` 直接跑(node ≥22 类型剥离),
  * 也可 `npm run smoke`(tsx)。
  *
- * 用法: node src/smoke-search.ts [--index-url <url>] [--top <n>] [查询词...]
+ * 用法: node src/smoke-search.ts [--index-url <url>] [--site-base <base>] [--top <n>] [查询词...]
  * 默认查询:「RAG」「提示词工程」「Agent 工作流」
  */
 import { WikiIndex } from './search.ts';
 
 const DEFAULT_INDEX_URL = 'https://aipm.ac/search/search_index.json';
+const DEFAULT_SITE_BASE = 'https://aipm.ac';
 
-function parseArgs(argv: string[]): { indexUrl: string; topN: number; queries: string[] } {
+function parseArgs(argv: string[]): { indexUrl: string; siteBase: string; topN: number; queries: string[] } {
   let indexUrl = process.env['SEARCH_INDEX_URL'] ?? DEFAULT_INDEX_URL;
+  let siteBase = process.env['SITE_BASE'] ?? DEFAULT_SITE_BASE;
   let topN = 5;
   const queries: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--index-url') {
       indexUrl = argv[++i] ?? DEFAULT_INDEX_URL;
+    } else if (arg === '--site-base') {
+      siteBase = argv[++i] ?? DEFAULT_SITE_BASE;
     } else if (arg === '--top') {
       topN = Number(argv[++i] ?? 5);
     } else {
@@ -26,13 +30,15 @@ function parseArgs(argv: string[]): { indexUrl: string; topN: number; queries: s
     }
   }
   if (queries.length === 0) queries.push('RAG', '提示词工程', 'Agent 工作流');
-  return { indexUrl, topN, queries };
+  return { indexUrl, siteBase, topN, queries };
 }
 
 async function main(): Promise<void> {
-  const { indexUrl, topN, queries } = parseArgs(process.argv.slice(2));
+  const { indexUrl, siteBase, topN, queries } = parseArgs(process.argv.slice(2));
   console.log(`下载索引: ${indexUrl}`);
-  const index = new WikiIndex(indexUrl, 0, 'https://aipm.ac');
+  console.log(`站点基址: ${siteBase}`);
+  // --index-url 指向自定义索引(如 staging)时,siteBase 应随之改为对应站点根
+  const index = new WikiIndex(indexUrl, 0, siteBase);
   await index.load();
   const stats = index.getStats();
   console.log(`条目数: ${stats.docCount}`);
