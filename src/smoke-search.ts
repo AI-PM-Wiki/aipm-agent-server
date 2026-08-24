@@ -9,7 +9,7 @@
  */
 import { WikiIndex } from './search.ts';
 
-const DEFAULT_INDEX_URL = 'https://hyc.ac/aipm/search/search_index.json';
+const DEFAULT_INDEX_URL = 'https://aipm.ac/search/search_index.json';
 
 function parseArgs(argv: string[]): { indexUrl: string; topN: number; queries: string[] } {
   let indexUrl = process.env['SEARCH_INDEX_URL'] ?? DEFAULT_INDEX_URL;
@@ -32,7 +32,7 @@ function parseArgs(argv: string[]): { indexUrl: string; topN: number; queries: s
 async function main(): Promise<void> {
   const { indexUrl, topN, queries } = parseArgs(process.argv.slice(2));
   console.log(`下载索引: ${indexUrl}`);
-  const index = new WikiIndex(indexUrl, 0, 'https://hyc.ac/aipm');
+  const index = new WikiIndex(indexUrl, 0, 'https://aipm.ac');
   await index.load();
   const stats = index.getStats();
   console.log(`条目数: ${stats.docCount}`);
