@@ -105,20 +105,26 @@ await index.load();
 }
 
 // ---- 标题加权 + 停用词过滤的端到端召回(线上索引) ----
+// 判定 helper:正典页精确匹配(location 整页条目 "page/" 或分节条目 "page/#…")。
+// 不能用 startsWith("page") —— 它会把同前缀旁系页也算命中:ai/rag 前缀下还有
+// ai/rag-retrieval / ai/rag-advanced 两个旁系页(2026-08-25 索引实测),「什么是 RAG」
+// 曾因此以旁系页 rank=1 通过,掩盖了正典页实际排在 top-5 外的召回失败。
 {
+  const isCanonicalPage = (location: string, page: string): boolean =>
+    location.split('#')[0] === page;
   const rag = index.search('什么是 RAG', 8);
-  const ragHit = rag.findIndex((h) => h.location.startsWith('ai/rag'));
+  const ragHit = rag.findIndex((h) => isCanonicalPage(h.location, 'ai/rag/'));
   check('召回: 什么是 RAG → 正典 RAG 页进 top-5', ragHit >= 0 && ragHit < 5, `rank=${ragHit + 1}, top1=${rag[0]?.title}`);
   const rag2 = index.search('RAG 是什么', 8);
-  const rag2Hit = rag2.findIndex((h) => h.location.startsWith('ai/rag'));
+  const rag2Hit = rag2.findIndex((h) => isCanonicalPage(h.location, 'ai/rag/'));
   check('召回: RAG 是什么 → 正典 RAG 页进 top-5', rag2Hit >= 0 && rag2Hit < 5, `rank=${rag2Hit + 1}`);
   // 内容漂移(文风批次新增导航/TOC 分节与正典页题名重叠)后,BM25 长度归一化下短节恒赢,
   // 搜索侧算术上无法翻盘;本断言对齐「正典页进 top-5」(与上方 RAG 检查模式一致),正典页实测 rank3/rank2。
   const prompt = index.search('提示词工程', 8);
-  const promptHit = prompt.findIndex((h) => h.location.startsWith('ai/prompting'));
+  const promptHit = prompt.findIndex((h) => isCanonicalPage(h.location, 'ai/prompting/'));
   check('召回: 提示词工程 → 正典页进 top-5', promptHit >= 0 && promptHit < 5, `rank=${promptHit + 1}, top1=${prompt[0]?.title}`);
   const kb = index.search('知识库问答', 8);
-  const kbHit = kb.findIndex((h) => h.location.startsWith('practice/kb-qa'));
+  const kbHit = kb.findIndex((h) => isCanonicalPage(h.location, 'practice/kb-qa/'));
   check('召回: 知识库问答 → 正典页进 top-5', kbHit >= 0 && kbHit < 5, `rank=${kbHit + 1}, top1=${kb[0]?.title}`);
   const halluc = index.search('幻觉问题怎么解决', 8);
   check(
