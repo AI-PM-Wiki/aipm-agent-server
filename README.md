@@ -116,6 +116,10 @@ docker compose up -d --build
   边缘终止,证书自动;`docs-agent.nvc.ac` 域名在 Cloudflare 侧托管。
 - **端口**:compose 只绑 `127.0.0.1:8787`,公网不暴露任何端口;DDoS/缓存归
   Cloudflare 管。
+- **HOST(容器内)**:`.env` 需设 `HOST=0.0.0.0`——server 默认 `127.0.0.1`,容器
+  内只监听自身回环,宿主映射(compose 的 `127.0.0.1:8787`)会连接被拒(healthz
+  在容器内健康但外部 502/连接重置)。`0.0.0.0` 仅指容器内;宿主仍只回环暴露,
+  公网不可直接达。
 - **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持——隧道下所有请求从本机
   cloudflared 进入,真实客户端 IP 在 `cf-connecting-ip` 头(server.ts 的
   clientIp 同时支持 fly-client-ip 与 cf-connecting-ip),否则限流全打在
