@@ -117,6 +117,10 @@ const TF_CAP = 3;
 const DROP_COMMON_DF_FRAC = 0.4;
 /** 二字 token 的构成单字 df 占比均超过此值 → 虚词组合(什么/么是/怎么…),剔除。 */
 const DROP_COMPOSITE_DF_FRAC = 0.3;
+/** 构成单字高频但自身只出现在 ≤此值 篇文档的二字 token = 专名/特有短语候选,无条件保留。
+ * 实测:会计 df=4、会=795、计=1056(0.2%,绝对占比极小)却因构成字高频被误删;
+ * 而真正的虚词组合(什么/么是/是什/怎么)自身 df 远高于此(48~759),不受保护。 */
+const RARE_BIGRAM_DF_MAX = 10;
 
 /**
  * 查询端停用词过滤(纯数据驱动,无手工词表):
@@ -124,6 +128,8 @@ const DROP_COMPOSITE_DF_FRAC = 0.3;
  *  - 二字 token df/N > DROP_COMMON_DF_FRAC 或由两个超高频单字组成 → 剔除
  *    (「什么是 X」的 什么/么是/是什 这类虚词组合会靠标题命中反杀真正主题词;
  *     内容词如 产品/经理 的构成字通常达不到 0.3,不受影响)
+ *  - 例外:构成单字虽高频、但自身 df 极小的二字 token(专名/特有短语,如 会计)
+ *    无条件保留——低 df 二元词是专名候选,能提供最强判别信号。
  * 全部被剔除时回退原 token,退化查询保底旧行为。
  */
 export function filterQueryTokens(
@@ -135,6 +141,8 @@ export function filterQueryTokens(
     const df = docFreq.get(tok) ?? 0;
     if (df / docCount > DROP_COMMON_DF_FRAC) return false;
     if (tok.length === 2) {
+      // 专名候选先于虚词组合规则(df=0 的未登录组合不保护,仍按虚词组合规则处理)
+      if (df >= 1 && df <= RARE_BIGRAM_DF_MAX) return true;
       const dfA = docFreq.get(tok[0]!) ?? 0;
       const dfB = docFreq.get(tok[1]!) ?? 0;
       if (dfA / docCount > DROP_COMPOSITE_DF_FRAC && dfB / docCount > DROP_COMPOSITE_DF_FRAC) {
@@ -451,6 +459,10 @@ export class WikiIndex {
   /**
    * read_wiki_page 定位:去 origin/base → 精确匹配整页条目;
    * 缺整页条目时合并 path/# 下所有分节条目;补斜杠兜底。纯内存,不发活 HTML 请求。
+   *
+   * 候选序(2026-08 修复):带锚点时「精确锚点分节」先于「整页条目」——
+   * 中文 hash 会被 URL 百分号编码(如 https://aipm.ac/ai/rag/#%E4%BA%A7…),
+   * 解码头再精确匹配,避免整页候选抢在锚点前命中而稳定回落整页。
    */
   resolvePage(urlOrPath: string): ResolvedPage | null {
     const base = new URL(this.siteBase);
@@ -473,23 +485,36 @@ export class WikiIndex {
     }
     input = input.replace(/^\/+/, '');
 
+    const hashIdx = input.indexOf('#');
+    const pagePath = hashIdx >= 0 ? input.slice(0, hashIdx) : input;
+    const anchor = hashIdx >= 0 ? input.slice(hashIdx) : '';
+
     const candidates: string[] = [];
     const add = (loc: string) => {
       if (!candidates.includes(loc)) candidates.push(loc);
     };
-    add(input);
-    const hashIdx = input.indexOf('#');
-    const pagePath = hashIdx >= 0 ? input.slice(0, hashIdx) : input;
-    const anchor = hashIdx >= 0 ? input.slice(hashIdx) : '';
-    // 精确整页条目
-    add(pagePath);
-    // 无锚点输入时也试尾部补斜杠(如 "ai/agent" → "ai/agent/")
-    if (!pagePath.endsWith('/') && pagePath !== '') add(pagePath + '/');
-    // 带锚点时,锚点版本 + 无锚点版本 + 补斜杠
+
+    // 精确锚点候选(先于整页):原始输入 + 百分号解码后的锚点版本
     if (anchor !== '') {
-      add(anchor === '#' ? pagePath : pagePath + anchor);
-      if (!pagePath.endsWith('/')) add(pagePath + '/' + anchor);
+      add(input);
+      const anchorVariants = [anchor];
+      if (anchor.includes('%')) {
+        try {
+          anchorVariants.push(decodeURIComponent(anchor));
+        } catch {
+          // 非法编码,保留原样
+        }
+      }
+      for (const a of anchorVariants) {
+        if (a === '#') continue; // 空锚点 = 整页,走下面整页候选
+        add(pagePath + a);
+        if (!pagePath.endsWith('/')) add(pagePath + '/' + a);
+      }
     }
+
+    // 整页候选(锚点命中失败时兜底):无锚点输入时也试尾部补斜杠(如 ai/agent → ai/agent/)
+    add(pagePath);
+    if (!pagePath.endsWith('/') && pagePath !== '') add(pagePath + '/');
 
     for (const candidate of candidates) {
       const exact = this.findLocation(candidate);
@@ -503,12 +528,14 @@ export class WikiIndex {
       }
     }
 
-    // 锚点带百分号编码(如 %E5%9F%BA...)时解码再试一次
+    // 路径本身也带百分号编码(如 %E6%96%87%E6%A1%A3)时解码再试一次
     if (input.includes('%')) {
       try {
         const decoded = decodeURIComponent(input);
-        const viaDecoded = this.resolvePage(decoded);
-        if (viaDecoded !== null) return viaDecoded;
+        if (decoded !== input) {
+          const viaDecoded = this.resolvePage(decoded);
+          if (viaDecoded !== null) return viaDecoded;
+        }
       } catch {
         // 非法编码,忽略
       }
@@ -526,14 +553,17 @@ export class WikiIndex {
     return this.docs.find((d) => d.location === location) ?? null;
   }
 
-  /** 合并 baseLoc 下所有分节条目(location === baseLoc 或 baseLoc#...),按 location 排序。 */
+  /**
+   * 合并 baseLoc 下所有分节条目(location === baseLoc 或 baseLoc#...)。
+   * 按索引中的文档自然顺序(即 mkdocs 搜索索引的产出顺序 = 文档内章节顺序)拼接,
+   * 不做 localeCompare('zh') 重排——中文数字序号(第一/第二/第三)按字典序会排乱,
+   * 且 mergeSections 仅在整页条目缺失时被调用,此时索引顺序就是阅读顺序。
+   */
   private mergeSections(baseLoc: string): ResolvedPage | null {
     const prefix = baseLoc + '#';
-    const sections = this.docs
-      .filter(
-        (d) => d.location === baseLoc || d.location.startsWith(prefix),
-      )
-      .sort((a, b) => a.location.localeCompare(b.location, 'zh'));
+    const sections = this.docs.filter(
+      (d) => d.location === baseLoc || d.location.startsWith(prefix),
+    );
     if (sections.length === 0) return null;
     const title = sections.find((s) => s.title)?.title || baseLoc;
     let text = '';

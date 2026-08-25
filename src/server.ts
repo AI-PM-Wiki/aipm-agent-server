@@ -229,182 +229,185 @@ export function createApp(deps: ServerDeps) {
     }
     const release = acquired.release;
 
-    let body = '';
-    const contentLength = Number(req.headers['content-length'] ?? 0);
-    if (contentLength > config.bodyLimitBytes) {
-      budget.release(estimate);
-      release();
-      sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      // 响应已 end,等 flush 后再销毁连接;直接 req.destroy() 会让响应字节丢失。
-      // 注:ServerResponse.destroySoon 已被 Node17+ 移除,等价改用 socket.destroySoon。
-      res.socket?.destroySoon();
-      return;
-    }
-    let overLimit = false;
-    let bodyTimedOut = false;
-    // 慢速 POST 防 DoS:body 读取超时(BODY_TIMEOUT_MS)后 destroy 连接,
-    // async 迭代随即抛错进入 catch,释放并发槽位。正常请求毫秒级读完,永不触发。
-    const bodyReadTimer = setTimeout(() => {
-      bodyTimedOut = true;
-      req.destroy();
-    }, config.bodyTimeoutMs);
+    // 并发槽位释放收进外层 finally:slot 从获得起必须恰好释放一次——
+    // runAgent 建参/SDK 异常(server.ts 历史版本在 outcome null 抛错路径跳过
+    // release)、413/400 等所有提前 return 都统一走 finally,杜绝槽位永久占用。
     try {
-      for await (const chunk of req) {
-        body += chunk;
-        if (body.length > config.bodyLimitBytes) {
-          overLimit = true;
-          break;
+      let body = '';
+      const contentLength = Number(req.headers['content-length'] ?? 0);
+      if (contentLength > config.bodyLimitBytes) {
+        budget.release(estimate);
+        sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
+        // 响应已 end,等 flush 后再销毁连接;直接 req.destroy() 会让响应字节丢失。
+        // 注:ServerResponse.destroySoon 已被 Node17+ 移除,等价改用 socket.destroySoon。
+        res.socket?.destroySoon();
+        return;
+      }
+      let overLimit = false;
+      let bodyTimedOut = false;
+      // 慢速 POST 防 DoS:body 读取超时(BODY_TIMEOUT_MS)后 destroy 连接,
+      // async 迭代随即抛错进入 catch,释放并发槽位。正常请求毫秒级读完,永不触发。
+      const bodyReadTimer = setTimeout(() => {
+        bodyTimedOut = true;
+        req.destroy();
+      }, config.bodyTimeoutMs);
+      try {
+        for await (const chunk of req) {
+          body += chunk;
+          // 按字节判体积(UTF-16 的 body.length 会被中文 chunked 请求绕过)
+          if (Buffer.byteLength(body) > config.bodyLimitBytes) {
+            overLimit = true;
+            break;
+          }
+        }
+        clearTimeout(bodyReadTimer);
+      } catch {
+        clearTimeout(bodyReadTimer);
+        budget.release(estimate);
+        sendError(
+          req,
+          res,
+          bodyTimedOut ? 408 : 400,
+          bodyTimedOut ? 'request_timeout' : 'bad_request',
+          bodyTimedOut ? '读取请求体超时' : '读取请求体失败',
+          corsHeaders,
+        );
+        return;
+      }
+      if (overLimit) {
+        budget.release(estimate);
+        sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
+        // 同上:等 flush 后再销毁;ServerResponse.destroySoon 已移除,用 socket 版。
+        res.socket?.destroySoon();
+        return;
+      }
+
+      let parsed: z.infer<typeof ChatBodySchema> | null = null;
+      try {
+        parsed = ChatBodySchema.parse(JSON.parse(body));
+      } catch {
+        parsed = null;
+      }
+      if (parsed === null) {
+        budget.release(estimate);
+        sendError(req, res, 400, 'bad_request', '请求体格式不正确:需要 {message, history?}', corsHeaders);
+        return;
+      }
+
+      const history = truncateHistory(parsed.history);
+
+      // —— 进入 SSE 流 ——
+      const sseHeaders: Record<string, string> = { ...corsHeaders };
+      if (origin === undefined) delete sseHeaders['Access-Control-Allow-Origin'];
+      initSseResponse(res, sseHeaders);
+      const safeWrite = (event: string, data: unknown) => {
+        if (res.writableEnded || res.destroyed) return;
+        try {
+          writeSseEvent(res, event, data);
+        } catch {
+          // 客户端已断开,忽略
+        }
+      };
+      safeWrite('ready', { requestId });
+      const stopHeartbeat = startHeartbeat(res);
+
+      let answerChars = 0;
+      let thinkingChars = 0;
+      let sourcesCount = 0;
+      const log = (extra: Record<string, unknown>) =>
+        console.log(
+          JSON.stringify({ ts: new Date().toISOString(), requestId, ...extra }),
+        );
+
+      // 墙钟上限:MAX_RUN_MS 到点 abort,防止单轮 agent 挂死(客户端断连也走同一
+      // abort 路径,靠 abortedByTimer 区分来源)。
+      runTimer = setTimeout(() => {
+        abortedByTimer = true;
+        abortController.abort();
+      }, config.maxRunMs);
+      runTimer.unref();
+      let outcome: AgentOutcome | null = null;
+      try {
+        outcome = await runAgent({
+          message: parsed.message,
+          history,
+          config,
+          index,
+          signal: abortController.signal,
+          callbacks: {
+            onDelta: (text) => {
+              answerChars += text.length;
+              safeWrite('delta', { text });
+            },
+            onThinking: (text) => {
+              thinkingChars += text.length; // 只计数标记,不渲染
+            },
+            onSources: (evt) => {
+              sourcesCount++;
+              safeWrite('sources', {
+                query: evt.query,
+                results: evt.results.map(({ title, url, snippet }) => ({
+                  title,
+                  url,
+                  snippet,
+                })),
+              });
+            },
+            onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
+          },
+        });
+      } finally {
+        if (runTimer !== null) {
+          clearTimeout(runTimer);
+          runTimer = null;
+        }
+        stopHeartbeat();
+        if (outcome !== null) {
+          // 正常/业务失败返回:按实际成本结算并释放预占(costUsd 为 0/undefined
+          // 也走 settle——未产生费用同样要把预占全额转回可用量)。
+          budget.settle(estimate, outcome.costUsd ?? 0);
+        } else {
+          // runAgent 抛异常(理论路径,其内部已兜住绝大多数错误):释放预占后
+          // 向上传播,走 handler_crash 的既有销毁路径。
+          budget.release(estimate);
         }
       }
-      clearTimeout(bodyReadTimer);
-    } catch {
-      clearTimeout(bodyReadTimer);
-      budget.release(estimate);
-      release();
-      sendError(
-        req,
-        res,
-        bodyTimedOut ? 408 : 400,
-        bodyTimedOut ? 'request_timeout' : 'bad_request',
-        bodyTimedOut ? '读取请求体超时' : '读取请求体失败',
-        corsHeaders,
-      );
-      return;
-    }
-    if (overLimit) {
-      budget.release(estimate);
-      release();
-      sendError(req, res, 413, 'payload_too_large', '请求体超限', corsHeaders);
-      // 同上:等 flush 后再销毁;ServerResponse.destroySoon 已移除,用 socket 版。
-      res.socket?.destroySoon();
-      return;
-    }
-
-    let parsed: z.infer<typeof ChatBodySchema> | null = null;
-    try {
-      parsed = ChatBodySchema.parse(JSON.parse(body));
-    } catch {
-      parsed = null;
-    }
-    if (parsed === null) {
-      budget.release(estimate);
-      release();
-      sendError(req, res, 400, 'bad_request', '请求体格式不正确:需要 {message, history?}', corsHeaders);
-      return;
-    }
-
-    const history = truncateHistory(parsed.history);
-
-    // —— 进入 SSE 流 ——
-    const sseHeaders: Record<string, string> = { ...corsHeaders };
-    if (origin === undefined) delete sseHeaders['Access-Control-Allow-Origin'];
-    initSseResponse(res, sseHeaders);
-    const safeWrite = (event: string, data: unknown) => {
-      if (res.writableEnded || res.destroyed) return;
-      try {
-        writeSseEvent(res, event, data);
-      } catch {
-        // 客户端已断开,忽略
+      if (outcome === null) {
+        // 不可达:runAgent 要么返回 outcome、要么抛异常(异常已在 finally 释放
+        // 预占后重新抛出)。此处防御性抛出,避免后续对 null 解引用。
+        throw new Error('runAgent 未返回结果');
       }
-    };
-    safeWrite('ready', { requestId });
-    const stopHeartbeat = startHeartbeat(res);
 
-    let answerChars = 0;
-    let thinkingChars = 0;
-    let sourcesCount = 0;
-    const log = (extra: Record<string, unknown>) =>
-      console.log(
-        JSON.stringify({ ts: new Date().toISOString(), requestId, ...extra }),
-      );
-
-    // 墙钟上限:MAX_RUN_MS 到点 abort,防止单轮 agent 挂死(客户端断连也走同一
-    // abort 路径,靠 abortedByTimer 区分来源)。
-    runTimer = setTimeout(() => {
-      abortedByTimer = true;
-      abortController.abort();
-    }, config.maxRunMs);
-    runTimer.unref();
-    let outcome: AgentOutcome | null = null;
-    try {
-      outcome = await runAgent({
-        message: parsed.message,
-        history,
-        config,
-        index,
-        signal: abortController.signal,
-        callbacks: {
-          onDelta: (text) => {
-            answerChars += text.length;
-            safeWrite('delta', { text });
-          },
-          onThinking: (text) => {
-            thinkingChars += text.length; // 只计数标记,不渲染
-          },
-          onSources: (evt) => {
-            sourcesCount++;
-            safeWrite('sources', {
-              query: evt.query,
-              results: evt.results.map(({ title, url, snippet }) => ({
-                title,
-                url,
-                snippet,
-              })),
-            });
-          },
-          onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
-        },
-      });
+      const timedOut = abortedByTimer;
+      const closedByClient = abortController.signal.aborted && !timedOut;
+      if (!closedByClient) {
+        if (outcome.ok) {
+          safeWrite('done', {
+            usage: outcome.usage,
+            costUsd: outcome.costUsd,
+            durationMs: outcome.durationMs,
+            numTurns: outcome.numTurns,
+          });
+          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
+        } else if (timedOut) {
+          // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
+          safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });
+          log({ event: 'run_timeout', durationMs: outcome.durationMs, answerChars, thinkingChars });
+        } else {
+          const code: AgentErrorCode = outcome.code ?? 'internal';
+          const message = outcome.message ?? '未知错误';
+          safeWrite('error', { code, message });
+          // message 可能含 SDK 异常/prompt 片段,日志只留前 200 字(承诺:日志不含明文 prompt)
+          log({ event: 'error', code, message: message.slice(0, 200), costUsd: outcome.costUsd, durationMs: outcome.durationMs });
+        }
+        if (!res.writableEnded) res.end();
+      } else {
+        log({ event: 'aborted_by_client', answerChars, thinkingChars });
+        if (!res.writableEnded) res.end();
+      }
     } finally {
-      if (runTimer !== null) {
-        clearTimeout(runTimer);
-        runTimer = null;
-      }
-      stopHeartbeat();
-      if (outcome !== null) {
-        // 正常/业务失败返回:按实际成本结算并释放预占(costUsd 为 0/undefined
-        // 也走 settle——未产生费用同样要把预占全额转回可用量)。
-        budget.settle(estimate, outcome.costUsd ?? 0);
-      } else {
-        // runAgent 抛异常(理论路径,其内部已兜住绝大多数错误):释放预占后
-        // 向上传播,走 handler_crash 的既有销毁路径。
-        budget.release(estimate);
-      }
+      release();
     }
-    if (outcome === null) {
-      // 不可达:runAgent 要么返回 outcome、要么抛异常(异常已在 finally 释放
-      // 预占后重新抛出)。此处防御性抛出,避免后续对 null 解引用。
-      throw new Error('runAgent 未返回结果');
-    }
-
-    const timedOut = abortedByTimer;
-    const closedByClient = abortController.signal.aborted && !timedOut;
-    if (!closedByClient) {
-      if (outcome.ok) {
-        safeWrite('done', {
-          usage: outcome.usage,
-          costUsd: outcome.costUsd,
-          durationMs: outcome.durationMs,
-          numTurns: outcome.numTurns,
-        });
-        log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
-      } else if (timedOut) {
-        // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
-        safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });
-        log({ event: 'run_timeout', durationMs: outcome.durationMs, answerChars, thinkingChars });
-      } else {
-        const code: AgentErrorCode = outcome.code ?? 'internal';
-        const message = outcome.message ?? '未知错误';
-        safeWrite('error', { code, message });
-        // message 可能含 SDK 异常/prompt 片段,日志只留前 200 字(承诺:日志不含明文 prompt)
-        log({ event: 'error', code, message: message.slice(0, 200), costUsd: outcome.costUsd, durationMs: outcome.durationMs });
-      }
-      if (!res.writableEnded) res.end();
-    } else {
-      log({ event: 'aborted_by_client', answerChars, thinkingChars });
-      if (!res.writableEnded) res.end();
-    }
-    release();
   }
 
   const server = createServer((req, res) => {
