@@ -37,7 +37,9 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 
 | 键 | 说明 |
 |---|---|
+| `PORT` / `HOST` | 监听端口(默认 8787)与绑定地址(默认 `127.0.0.1`,仅回环;公网暴露需显式 `0.0.0.0` 并自备防护) |
 | `ANTHROPIC_API_KEY` | 必填,缺失时启动快速失败 |
+| `SITE_BASE` | 站点根(默认 `https://aipm.ac`),检索结果与页面链接的拼接基址 |
 | `MODEL` / `EFFORT` / `MAX_BUDGET_USD` / `MAX_TURNS` | SDK 会话参数(预算与轮数由 SDK 强制) |
 | `SEARCH_INDEX_URL` / `INDEX_REFRESH_MS` | 索引地址与后台刷新间隔(默认 30 分钟) |
 | `ALLOWED_ORIGINS` | 精确 Origin 白名单,逗号分隔,无通配符、无凭据 |
@@ -45,16 +47,19 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `QUEUE_LIMIT` / `QUEUE_WAIT_MS` | 并发满时排队深度(默认 10)与等待上限(默认 60s),超限 503 + Retry-After |
 | `API_KEY` | **无 Origin 请求**(curl/脚本/爬虫)须携带 `X-API-Key` 头,否则 401;留空 = 不校验。浏览器请求由 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,本层防无差别扫描,针对性攻击由日预算兜底 |
 | `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
-| `BODY_TIMEOUT_MS` | 请求体读取超时(默认 15s):慢速 POST 拖占并发槽位的 DoS 兜底,超时断开连接并释放槽位;正常请求毫秒级读完不受影响 |
-| `TRUST_PROXY` | 置 `true` 时从 `Fly-Client-IP` 取客户端 IP(否则 socket 地址) |
+| `BODY_LIMIT_BYTES` / `BODY_TIMEOUT_MS` | 请求体上限(默认 64 KiB,超限 413)与读取超时(默认 15s,慢速 POST 防 DoS) |
+| `MAX_RUN_MS` | 单轮问答墙钟上限(默认 120s):到点强制中止(SSE `error` 帧,code `internal`),防 agent 挂死 |
+| `SCRATCH_DIR` | SDK 子进程工作目录(默认 `/tmp/aipm-agent-scratch`) |
+| `TRUST_PROXY` | 置 `true` 时从 `Fly-Client-IP` / `cf-connecting-ip` 取客户端 IP(否则 socket 地址) |
 
 ## 开发与运行
 
 ```bash
 npm install          # 装依赖(含 SDK 自带 CLI 原生二进制)
 npm run build        # tsc → dist/
-npm start            # 起服务,监听 PORT(默认 8787)
+npm start            # 起服务,监听 HOST:PORT(默认 127.0.0.1:8787)
 npm run smoke        # 检索冒烟:BM25 top-5 目检(零依赖,也可 node src/smoke-search.ts)
+npm run unit-check   # 无依赖单元检查(分词/BM25/定位/限流等,需网络访问线上索引)
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
 ```
@@ -69,9 +74,12 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 | `sources` | `{query, results:[{title,url,snippet}]}` | 每次 search_wiki 返回 |
 | `delta` | `{text}` 增量 | 回答 token 块 |
 | `done` | `{usage, costUsd, durationMs, numTurns}` | 终帧后关闭 |
-| `error` | `{code: rate_limited\|budget_exceeded\|max_turns\|model_error\|internal, message}` | 随后关闭 |
+| `error` | `{code: budget_exceeded\|max_turns\|model_error\|internal, message}` | 随后关闭 |
 
-预校验失败(400/403/413/429/503)返回纯 JSON,非 SSE。客户端断连即 abort,停止计费。
+预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
+`code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内
+`error` 帧只有上表 4 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
+客户端断连即 abort,停止计费。
 
 ## 部署注意
 
@@ -85,21 +93,23 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 - 日志不含原始 IP 与明文 prompt(限流事件只记 IP 的 sha256 前缀)。
 - 首次启动需要能访问 `SEARCH_INDEX_URL`;SDK 需要能访问 Anthropic API(或配置代理)。
 
-## 部署(Docker Compose + Cloudflare 隧道)
+## 部署(Docker Compose + 系统级 Cloudflare 隧道)
 
-仓库自带 `Dockerfile` + `docker-compose.yml`(agent-server + cloudflared 双容器):
+仓库自带 `Dockerfile` + `docker-compose.yml`(单容器 agent-server;HTTPS/域名
+由 VPS **系统级 cloudflared** 隧道承担,不再内置 cloudflared 容器):
 
 ```bash
 # VPS 上:装 docker + compose 插件;拉取或拷贝本仓库
 cd agent-server
-cp .env.example .env          # 填 ANTHROPIC_API_KEY 与 TUNNEL_TOKEN
+cp .env.example .env          # 填 ANTHROPIC_API_KEY(隧道 token 由系统级 cloudflared 负责)
 docker compose up -d --build
 ```
 
-- **HTTPS/域名**:Cloudflare Zero Trust → Networks → Tunnels 建隧道,拿 token 填
-  `.env` 的 `TUNNEL_TOKEN`;public hostname 配 `docs-agent.nvc.ac` →
-  `http://agent-server:8787`(compose 内网服务名)。HTTPS 由 Cloudflare 边缘
-  终止,证书自动;`docs-agent.nvc.ac` 域名在 Cloudflare 侧托管。
+- **HTTPS/域名**:Cloudflare Zero Trust → Networks → Tunnels 建隧道;隧道由
+  VPS 上系统级 cloudflared 运行(如 ai-gateway 隧道,ingress 配置在
+  `/etc/cloudflared/config.yml`),public hostname 配 `docs-agent.nvc.ac` →
+  `http://127.0.0.1:8787`(compose 绑定的宿主回环端口)。HTTPS 由 Cloudflare
+  边缘终止,证书自动;`docs-agent.nvc.ac` 域名在 Cloudflare 侧托管。
 - **端口**:compose 只绑 `127.0.0.1:8787`,公网不暴露任何端口;DDoS/缓存归
   Cloudflare 管。
 - **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持——隧道下所有请求从本机

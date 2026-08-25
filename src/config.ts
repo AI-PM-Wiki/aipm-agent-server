@@ -9,6 +9,7 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface Config {
   port: number;
+  host: string;
   anthropicApiKey: string;
   model: string;
   effort: EffortLevel;
@@ -27,12 +28,15 @@ export interface Config {
   dailyBudgetUsd: number;
   bodyLimitBytes: number;
   bodyTimeoutMs: number;
+  maxRunMs: number;
   trustProxy: boolean;
   scratchDir: string;
 }
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
+  // 绑定地址:默认仅回环 127.0.0.1(bare npm start 不暴露公网);公网暴露需显式 0.0.0.0。
+  HOST: z.string().min(1).default('127.0.0.1'),
   ANTHROPIC_API_KEY: z.string().min(1),
   MODEL: z.string().min(1).default('claude-opus-5'),
   EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
@@ -61,6 +65,8 @@ const EnvSchema = z.object({
   BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(65_536),
   // 请求体读取超时(ms):慢速 POST 拖住并发槽位的 DoS 兜底,超时断开并释放槽位。
   BODY_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
+  // 单轮问答墙钟上限(ms):到点强制 abort(与客户端断连同一中止路径),防 agent 挂死。
+  MAX_RUN_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(120_000),
   TRUST_PROXY: z.string().default('false'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
 });
@@ -80,6 +86,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const e = parsed.data;
   return {
     port: e.PORT,
+    host: e.HOST,
     anthropicApiKey: e.ANTHROPIC_API_KEY,
     model: e.MODEL,
     effort: e.EFFORT,
@@ -100,6 +107,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dailyBudgetUsd: e.DAILY_BUDGET_USD,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
     bodyTimeoutMs: e.BODY_TIMEOUT_MS,
+    maxRunMs: e.MAX_RUN_MS,
     trustProxy: parseBool(e.TRUST_PROXY),
     scratchDir: e.SCRATCH_DIR,
   };

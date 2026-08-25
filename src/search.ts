@@ -182,10 +182,14 @@ function collapseWs(text: string): string {
 
 /** 命中 token 附近 ±60 字摘要;优先出现位置最靠前的 query token,长 token 优先。 */
 export function makeSnippet(text: string, queryTokens: string[], maxLen = SNIPPET_MAX_LEN): string {
+  // 查询 token 已归一化(小写/全角→半角),对原文 indexOf 锚定不到纯拉丁命中
+  // (token "rag" 对原文 "RAG")。先对 normalizeText(text) 定位——normalizeText
+  // 为逐字符 1:1 映射(全角→半角、小写),归一化位置即原文位置——再按同位切原文。
+  const norm = normalizeText(text);
   let best: { idx: number; len: number } | null = null;
   for (const tok of queryTokens) {
     if (tok.length < 2) continue;
-    const idx = text.indexOf(tok);
+    const idx = norm.indexOf(tok);
     if (idx < 0) continue;
     if (best === null || idx < best.idx || (idx === best.idx && tok.length > best.len)) {
       best = { idx, len: tok.length };
@@ -292,6 +296,8 @@ export class WikiIndex {
   private lastLoadedAt: number | null = null;
   private lastError: string | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** 刷新 in-flight 标记:重入保护,防叠加并发抓取。 */
+  private refreshing = false;
   private readonly indexUrl: string;
   private readonly refreshMs: number;
   private readonly siteBase: string;
@@ -343,10 +349,16 @@ export class WikiIndex {
 
   /** 后台刷新;失败保留旧索引并记录 lastError(stale 标记)。 */
   async refresh(): Promise<void> {
+    // 重入保护:INDEX_REFRESH_MS 下限(10s)可小于 fetch 超时(30s),刷新中再次
+    // 触发会叠加并发抓取;in-flight 时跳过本轮,下个周期再试。
+    if (this.refreshing) return;
+    this.refreshing = true;
     try {
       await this.load();
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.refreshing = false;
     }
   }
 
@@ -371,10 +383,6 @@ export class WikiIndex {
       lastLoadedAt: this.lastLoadedAt,
       lastError: this.lastError,
     };
-  }
-
-  get siteUrl(): string {
-    return this.siteBase;
   }
 
   /** BM25 top-N 检索,只求召回(agent 会再读全文)。 */

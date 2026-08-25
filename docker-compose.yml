@@ -1,14 +1,15 @@
-# AI-PM Agent Server 部署(美西 VPS:Docker Compose + Cloudflare 隧道)
+# AI-PM Agent Server 部署(美西 VPS:Docker Compose + 系统级 Cloudflare 隧道)
 #
-# 拓扑:公网 → Cloudflare 边缘(HTTPS 终止)→ 隧道 → 本机 cloudflared 容器
-#       → http://agent-server:8787(compose 内网)。对外只绑回环端口,
+# 拓扑:公网 → Cloudflare 边缘(HTTPS 终止)→ 隧道 → 本机系统级 cloudflared
+#       → http://127.0.0.1:8787(compose 绑定的回环端口)。对外只绑回环端口,
 #       公网不暴露任何端口。
 #
 # 用法:
-#   1. cp .env.example .env,填 ANTHROPIC_API_KEY 与 TUNNEL_TOKEN
+#   1. cp .env.example .env,填 ANTHROPIC_API_KEY
 #   2. docker compose up -d --build
-#   3. Cloudflare Zero Trust → Networks → Tunnels:建隧道拿 token,
-#      public hostname 配 docs-agent.nvc.ac → http://agent-server:8787
+#   3. Cloudflare Zero Trust → Networks → Tunnels:隧道由 VPS 系统级
+#      cloudflared 运行(如 ai-gateway 隧道,ingress 在 /etc/cloudflared/config.yml),
+#      public hostname 配 docs-agent.nvc.ac → http://127.0.0.1:8787
 #   4. curl https://docs-agent.nvc.ac/healthz 验证
 #
 # 注意:TRUST_PROXY 必须为 true(限流取 cf-connecting-ip 真实客户端 IP,
@@ -17,16 +18,23 @@
 services:
   agent-server:
     build: .
-    image: aipm-agent-server:latest
+    image: aipm-agent-server:0.1.0
     restart: unless-stopped
     env_file: .env
+    # 资源上限(保守值,防单容器吃满 VPS;按负载可调)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1536M
     ports:
       - "127.0.0.1:8787:8787"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
-      start_period: 15s
+      # start_period 45s:首次启动需下载并分词索引(最坏 30s fetch 超时)+ 余量
+      start_period: 45s
       retries: 3
 
   # cloudflared 停用:本机隧道由系统级 cloudflared(ai-gateway 隧道,
