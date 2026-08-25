@@ -26,7 +26,9 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
     顶格召回(「什么是 RAG」从 top-8 外 → 正典页第一);
   - 查询侧:df 占比 >40% 的单字(是/的/了…虚词)剔除;二字 token 若 df>40% 或由
     两个 df>30% 的超高频单字组成(什么/么是/是什/怎么 这类虚词组合)同样剔除——
-    「什么是 X」不再被标题命中的虚词组合反杀。全部被剔除时回退原 token。
+    「什么是 X」不再被标题命中的虚词组合反杀;但构成单字虽高频、自身却极稀见
+    (df≤10 篇文档)的二字 token 视为专名/特有短语候选(实测「会计」df=4 曾被
+    误删,查询只剩单字「会」),无条件保留。全部被剔除时回退原 token。
 - 工具面:`tools: []` 禁用全部内置工具,只剩 `mcp__wiki__search_wiki` / `mcp__wiki__read_wiki_page`;
   `disallowedTools` 列 9 项内置工具纵深防御;`strictMcpConfig` + `settingSources: []` 隔离宿主配置。
 - SDK 子进程工作目录指向空 scratch 目录(`SCRATCH_DIR`),`persistSession: false`。
