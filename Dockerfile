@@ -2,12 +2,15 @@
 # 两阶段:构建阶段 npm ci + tsc 出 dist;运行阶段只带生产依赖与产物。
 # 基础镜像选 node:22-slim(Debian/glibc)——Agent SDK 的 CLI 原生二进制
 # 按平台走 optionalDependencies,glibc 环境兼容性最稳,勿换 alpine。
+# 镜像 tag 固定到具体版本 22.23.2-slim(2026-08-25 核实的最新 22.x LTS;
+# 版本 tag 不可变,浮动 main tag 升级可能引入行为差异)。如需升级 Node,
+# 同步更新下面两处 FROM 并验证构建/启动。
 #
 # 运行所需环境变量(部署时经 .env 注入,见 README「部署」):
 #   ANTHROPIC_API_KEY(必填) / SEARCH_INDEX_URL / ALLOWED_ORIGINS / TRUST_PROXY ...
 
 # ---- 构建 ----
-FROM node:22-slim AS build
+FROM node:22.23.2-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -16,7 +19,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # ---- 运行 ----
-FROM node:22-slim
+FROM node:22.23.2-slim
 # 镜像版本与 package.json 保持同步(compose 的 image tag 用同版本,如 aipm-agent-server:0.1.0)
 ARG VERSION=0.1.0
 LABEL org.opencontainers.image.version=$VERSION

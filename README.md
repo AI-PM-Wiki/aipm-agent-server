@@ -46,11 +46,12 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` / `CONCURRENCY_LIMIT` | 每 IP 滑动窗口限流 + 并发信号量(成本护栏) |
 | `QUEUE_LIMIT` / `QUEUE_WAIT_MS` | 并发满时排队深度(默认 10)与等待上限(默认 60s),超限 503 + Retry-After |
 | `API_KEY` | **无 Origin 请求**(curl/脚本/爬虫)须携带 `X-API-Key` 头,否则 401;留空 = 不校验。浏览器请求由 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,本层防无差别扫描,针对性攻击由日预算兜底 |
-| `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
+| `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。**预占-结算**:请求先原子预占单轮上限(`MAX_BUDGET_USD`),执行后按实际成本结算,并发/失败路径自动释放——不会因「先检查后记账」的竞态窗口超支。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
 | `BODY_LIMIT_BYTES` / `BODY_TIMEOUT_MS` | 请求体上限(默认 64 KiB,超限 413)与读取超时(默认 15s,慢速 POST 防 DoS) |
 | `MAX_RUN_MS` | 单轮问答墙钟上限(默认 120s):到点强制中止(SSE `error` 帧,code `internal`),防 agent 挂死 |
 | `SCRATCH_DIR` | SDK 子进程工作目录(默认 `/tmp/aipm-agent-scratch`) |
-| `TRUST_PROXY` | 置 `true` 时从 `Fly-Client-IP` / `cf-connecting-ip` 取客户端 IP(否则 socket 地址) |
+| `TRUST_PROXY` | 置 `true` **且直连来源属于 `TRUSTED_PROXY_IPS`(默认回环)** 时,才从 `Fly-Client-IP` / `cf-connecting-ip` 取客户端 IP;否则忽略转发头、回落 socket 地址。直连暴露(`HOST=0.0.0.0`)时不会信任任意来源的伪造转发头,每 IP 限流无法被绕过 |
+| `TRUSTED_PROXY_IPS` | 可信代理 IP 列表,逗号分隔(默认 `127.0.0.1,::1,::ffff:127.0.0.1`):仅当 `TRUST_PROXY=true` 且连接来自这些地址时才读取转发头 |
 
 ## 开发与运行
 
@@ -83,8 +84,9 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 
 ## 部署注意
 
-- **单实例假设**:限流与并发信号量是进程内状态,横向扩容需改为共享存储
-  (Redis 等);并发上限 4 对应 SDK 子进程数,实例数 × 4 为总并发。并发满时
+- **单实例假设**:限流、并发信号量与日预算护栏(已消耗 + 预占)都是进程内
+  状态,横向扩容需改为共享存储(Redis 等);并发上限 4 对应 SDK 子进程数,
+  实例数 × 4 为总并发。并发满时
   请求进入有界队列(`QUEUE_LIMIT`/`QUEUE_WAIT_MS`),不排队失败——这是成本
   护栏而非性能瓶颈:每个槽位背后是实打实的 LLM 调用,宁可让用户稍等也不可
   无上限并发烧穿月度预算。
@@ -116,6 +118,7 @@ docker compose up -d --build
   cloudflared 进入,真实客户端 IP 在 `cf-connecting-ip` 头(server.ts 的
   clientIp 同时支持 fly-client-ip 与 cf-connecting-ip),否则限流全打在
   127.0.0.1 上失效。
-- **成本护栏是进程内状态**:单实例假设,限流/并发信号量随实例走,扩容需改
-  共享存储(Redis 等);并发上限 4 对应 SDK 子进程数。
+- **成本护栏是进程内状态**:单实例假设,限流/并发信号量与日预算(预占-结算)
+  随实例走,多实例时总日预算 = 实例数 × `DAILY_BUDGET_USD`,扩容需改共享
+  存储(Redis 等);并发上限 4 对应 SDK 子进程数。
 - 验证:`curl https://docs-agent.nvc.ac/healthz` → `{ok, indexDocs, stale, ...}`。

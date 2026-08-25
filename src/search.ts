@@ -280,10 +280,25 @@ export function parseIndexPayload(payload: unknown): IndexDoc[] {
 
 const FETCH_TIMEOUT_MS = 30_000;
 
+/** 脱敏索引错误:lastError 经公开 /healthz 返回,只保留错误类别与 HTTP 状态,
+ * 不含 URL 等部署细节(SEARCH_INDEX_URL 可能含凭据/内部地址,只进服务日志)。 */
+function describeIndexError(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message;
+    // fetchIndexJson 抛出的错误已不含 URL;网络层错误(fetch failed/超时)仅保留类别。
+    if (/^抓取 search index 失败: HTTP \d+$/.test(msg)) return msg;
+    if (msg.startsWith('search_index.json 结构异常:')) return msg;
+    return '抓取 search index 失败: 网络或超时异常';
+  }
+  return '未知错误';
+}
+
 export async function fetchIndexJson(url: string): Promise<IndexDoc[]> {
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) {
-    throw new Error(`抓取 search index 失败: HTTP ${res.status} (${url})`);
+    // 错误消息不含 url(#9):该消息会经 refresh() 写入 lastError 并被公开
+    // /healthz 返回,索引地址(可能含凭据/内部地址)只进服务日志。
+    throw new Error(`抓取 search index 失败: HTTP ${res.status}`);
   }
   return parseIndexPayload(await res.json());
 }
@@ -356,7 +371,17 @@ export class WikiIndex {
     try {
       await this.load();
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : String(err);
+      // URL 只进服务日志,不上 lastError(公开 /healthz 可读):lastError 只留
+      // 错误类别/HTTP 状态,避免 SEARCH_INDEX_URL 含凭据/内部地址时泄露。
+      this.lastError = describeIndexError(err);
+      console.log(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          event: 'index_refresh_failed',
+          url: this.indexUrl,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     } finally {
       this.refreshing = false;
     }
