@@ -312,6 +312,13 @@ export function parseIndexPayload(payload: unknown): IndexDoc[] {
 
 const FETCH_TIMEOUT_MS = 30_000;
 
+/**
+ * 后台 refresh() 连续失败达到该次数后,失败日志升级为告警(stderr)。
+ * 审计 #6:此前每次失败仅记 lastError + 一条常规日志,生产环境索引静默过期
+ * (stale)无人知晓;连续多次失败通常意味着索引源持续不可达,需要人工介入。
+ */
+const INDEX_REFRESH_FAIL_ALERT_THRESHOLD = 3;
+
 /** 脱敏索引错误:lastError 经公开 /healthz 返回,只保留错误类别与 HTTP 状态,
  * 不含 URL 等部署细节(SEARCH_INDEX_URL 可能含凭据/内部地址,只进服务日志)。 */
 function describeIndexError(err: unknown): string {
@@ -345,6 +352,8 @@ export class WikiIndex {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   /** 刷新 in-flight 标记:重入保护,防叠加并发抓取。 */
   private refreshing = false;
+  /** 后台 refresh() 连续失败计数;成功一次清零(见 INDEX_REFRESH_FAIL_ALERT_THRESHOLD)。 */
+  private consecutiveRefreshFailures = 0;
   private readonly indexUrl: string;
   private readonly refreshMs: number;
   private readonly siteBase: string;
@@ -402,18 +411,39 @@ export class WikiIndex {
     this.refreshing = true;
     try {
       await this.load();
+      // 成功一次即清零计数;若刚从连续失败中恢复,补一条恢复事件(#6)。
+      if (this.consecutiveRefreshFailures > 0) {
+        const failedBefore = this.consecutiveRefreshFailures;
+        this.consecutiveRefreshFailures = 0;
+        console.log(
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            event: 'index_refresh_recovered',
+            failedBefore,
+            docCount: this.docs.length,
+          }),
+        );
+      }
     } catch (err) {
       // URL 只进服务日志,不上 lastError(公开 /healthz 可读):lastError 只留
       // 错误类别/HTTP 状态,避免 SEARCH_INDEX_URL 含凭据/内部地址时泄露。
       this.lastError = describeIndexError(err);
-      console.log(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          event: 'index_refresh_failed',
-          url: this.indexUrl,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      // 连续失败告警(#6):每次失败递增计数并携带 consecutive 字段;
+      // 达到 INDEX_REFRESH_FAIL_ALERT_THRESHOLD 起升级为 stderr 告警,
+      // 生产环境索引静默过期不再只留常规日志无人知晓。成功后计数清零。
+      this.consecutiveRefreshFailures++;
+      const atThreshold =
+        this.consecutiveRefreshFailures >= INDEX_REFRESH_FAIL_ALERT_THRESHOLD;
+      const payload = JSON.stringify({
+        ts: new Date().toISOString(),
+        event: 'index_refresh_failed',
+        consecutive: this.consecutiveRefreshFailures,
+        ...(atThreshold ? { alert: true } : {}),
+        url: this.indexUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (atThreshold) console.error(payload);
+      else console.log(payload);
     } finally {
       this.refreshing = false;
     }

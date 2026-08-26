@@ -57,6 +57,20 @@ export function createApp(deps: ServerDeps) {
     return config.allowedOrigins.includes(origin);
   }
 
+  /**
+   * CORS 头最小暴露(#4):仅当 Origin 命中白名单时才反射进 ACAO;
+   * 白名单外或无 Origin 的响应一律不带该头(此前对任意 Origin 无条件反射,
+   * 且无 Origin 时回填空串 ACAO)。Vary: Origin 始终保留,防中间缓存按
+   * 无 ACAO 的响应误缓存命中带 ACAO 变体。
+   */
+  function corsHeadersFor(origin: string | undefined): Record<string, string> {
+    const headers: Record<string, string> = { Vary: 'Origin' };
+    if (origin !== undefined && config.allowedOrigins.includes(origin)) {
+      headers['Access-Control-Allow-Origin'] = origin;
+    }
+    return headers;
+  }
+
   /** 一次性告警标记:同一进程只打一次 warn,防刷屏。 */
   let warnedUntrustedProxy = false;
 
@@ -149,10 +163,10 @@ export function createApp(deps: ServerDeps) {
       if (!res.writableEnded) abortController.abort();
     });
     const origin = req.headers.origin;
-    const corsHeaders: Record<string, string> = {
-      'Access-Control-Allow-Origin': origin === undefined ? '' : origin,
-      Vary: 'Origin',
-    };
+    // #4 最小暴露:corsHeaders 只在 Origin 命中白名单时含 ACAO。白名单外请求
+    // 在下方直接 403(不带 ACAO);无 Origin 请求(curl/脚本)本不受 CORS 约束,
+    // 不再回填空串 ACAO。
+    const corsHeaders = corsHeadersFor(origin);
     if (origin !== undefined && !originAllowed(origin)) {
       // 不反射被拒的 Origin(#7):403 响应不带 Access-Control-Allow-Origin,
       // 浏览器 CORS 校验失败、读不到 403 响应体,避免把非白名单 Origin 回显为
@@ -297,9 +311,8 @@ export function createApp(deps: ServerDeps) {
       const history = truncateHistory(parsed.history);
 
       // —— 进入 SSE 流 ——
-      const sseHeaders: Record<string, string> = { ...corsHeaders };
-      if (origin === undefined) delete sseHeaders['Access-Control-Allow-Origin'];
-      initSseResponse(res, sseHeaders);
+      // corsHeadersFor 已保证仅白名单 Origin 带 ACAO,直接复用
+      initSseResponse(res, { ...corsHeaders });
       const safeWrite = (event: string, data: unknown) => {
         if (res.writableEnded || res.destroyed) return;
         try {
@@ -416,6 +429,9 @@ export function createApp(deps: ServerDeps) {
     const method = req.method ?? 'GET';
 
     if (method === 'OPTIONS') {
+      // #4 预检最小暴露:非白名单 Origin → 403 不带 ACAO(浏览器自然拦截);
+      // 白名单 Origin 才反射进 ACAO;无 Origin 的 OPTIONS 仍 204 但不带 ACAO。
+      // 状态码语义保持现状。
       if (!originAllowed(req.headers.origin)) {
         sendError(req, res, 403, 'forbidden', 'Origin 不在白名单');
         return;
