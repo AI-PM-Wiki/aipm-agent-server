@@ -124,10 +124,13 @@ docker compose up -d --build
   内只监听自身回环,宿主映射(compose 的 `127.0.0.1:8787`)会连接被拒(healthz
   在容器内健康但外部 502/连接重置)。`0.0.0.0` 仅指容器内;宿主仍只回环暴露,
   公网不可直接达。
-- **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持——隧道下所有请求从本机
-  cloudflared 进入,真实客户端 IP 在 `cf-connecting-ip` 头(server.ts 的
-  clientIp 同时支持 fly-client-ip 与 cf-connecting-ip),否则限流全打在
-  127.0.0.1 上失效。
+- **限流**:`.env` 的 `TRUST_PROXY=true` 必须保持,且 `TRUSTED_PROXY_IPS`
+  必须包含 **docker 网桥网关**(compose 默认网络下形如 `172.19.0.1`)。
+  容器内看到的直连来源是网桥网关,不是 `127.0.0.1` —— 只写回环的话
+  `cf-connecting-ip` 会被整条忽略,回落到 socket 地址,于是**所有请求算同一个
+  IP**,每 IP 限流退化成全站共享一个桶(2026-09-20 线上实测就是这个状态:
+  日志里出现 `untrusted_proxy_ignored` 且 `remoteAddrHash` = sha256("172.19.0.1")[:16])。
+  自查:`docker logs <容器> | grep untrusted_proxy_ignored`,有一条就是没配上。
 - **成本护栏是进程内状态**:单实例假设,限流/并发信号量与日预算(预占-结算)
   随实例走,多实例时总日预算 = 实例数 × `DAILY_BUDGET_USD`,扩容需改共享
   存储(Redis 等);并发上限 4 对应 SDK 子进程数。
