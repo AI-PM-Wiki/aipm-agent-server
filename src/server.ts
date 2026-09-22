@@ -17,7 +17,7 @@ import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
-import { CONTEXT_LIMITS, CONTEXT_MAX_ITEMS } from './context.ts';
+import { CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
@@ -28,21 +28,33 @@ import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
  *
  * `visibility` 的枚举里没有 `local` —— 「仅本机」的批注只存在浏览器里,送进对话
  * 等于把它发到本服务并进入模型上下文。带上它的请求在这里就被拒(400),不会走到
- * 模型那一步。前端的 forAnnotation 也不产出这种语境,两道闸各自独立。
+ * 模型那一步。前端那边也有独立的一道(见主仓库 docs/_static/js/context-item.js
+ * 的 isDeliverable)。
+ *
+ * 字段类型与长度由这里管,**跨字段的必填规则**(kind 决定 quote / body 谁不能为空)
+ * 由 contextItemProblem 管,作为 refinement 挂在同一个 schema 上 —— 于是 HTTP 那
+ * 一层只剩「400」与「继续」两种结果,校验不会漏在 schema 之外。
  */
-const ContextItemSchema = z.object({
-  kind: z.enum(['selection', 'annotation']),
-  page: z.string().min(1).max(CONTEXT_LIMITS.page),
-  title: z.string().max(CONTEXT_LIMITS.title).default(''),
-  quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
-  prefix: z.string().max(CONTEXT_LIMITS.edge).default(''),
-  suffix: z.string().max(CONTEXT_LIMITS.edge).default(''),
-  body: z.string().max(CONTEXT_LIMITS.body).default(''),
-  color: z.string().max(CONTEXT_LIMITS.color).default(''),
-  visibility: z.enum(['public', 'private']).default('public'),
-});
+const ContextItemSchema = z
+  .object({
+    kind: z.enum(['selection', 'annotation']),
+    page: z.string().min(1).max(CONTEXT_LIMITS.page),
+    title: z.string().max(CONTEXT_LIMITS.title).default(''),
+    quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
+    prefix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+    suffix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+    body: z.string().max(CONTEXT_LIMITS.body).default(''),
+    color: z.string().max(CONTEXT_LIMITS.color).default(''),
+    visibility: z.enum(['public', 'private']).default('public'),
+  })
+  .superRefine((item, ctx) => {
+    const problem = contextItemProblem(item);
+    if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+  });
 
-const ChatBodySchema = z.object({
+/* 导出给 src/context-http-check.ts:走 HTTP 只能证明「坏的被拒」——收得下的请求
+   会一路走到模型,那是真金白银的一轮。所以「好的收得下」由 schema 本身断言。 */
+export const ChatBodySchema = z.object({
   message: z.string().min(1).max(10_000),
   history: z
     .array(
@@ -335,7 +347,8 @@ export function createApp(deps: ServerDeps) {
           400,
           'bad_request',
           '请求体格式不正确:需要 {message, history?, context?};' +
-            'context 里每条要有 kind 与 page,批注语境只接受 public / private',
+            'context 里每条要有 kind 与 page,划选必须有原文,批注的原文与正文' +
+            '至少要有一段,可见范围只接受 public / private',
           corsHeaders,
         );
         return;

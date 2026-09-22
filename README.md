@@ -66,7 +66,8 @@ npm install          # 装依赖(含 SDK 自带 CLI 原生二进制)
 npm run build        # tsc → dist/
 npm start            # 起服务,监听 HOST:PORT(默认 127.0.0.1:8787)
 npm run smoke        # 检索冒烟:BM25 top-5 目检(零依赖,也可 node src/smoke-search.ts)
-npm run unit-check   # 无依赖单元检查(分词/BM25/定位/语境渲染/限流等,需网络访问线上索引)
+npm run unit-check   # 无依赖单元检查(分词/BM25/定位/语境渲染与校验/限流等,需网络访问线上索引)
+npm run context-check   # /api/chat 的语境校验自检(要 npm 依赖,不联网):schema 断言 + 真发 HTTP 断言坏请求停在 400
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
 ```

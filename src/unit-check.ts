@@ -2,12 +2,12 @@
 /**
  * 无依赖单元检查(node ≥22 类型剥离直跑):
  *   node src/unit-check.ts
- * 覆盖:分词、BM25 相关性、resolvePage 定位、历史截断、限流/信号量。
+ * 覆盖:分词、BM25 相关性、resolvePage 定位、历史截断、限流/信号量、语境条目。
  * 依赖网络(下载线上索引);不需要 npm 包与 ANTHROPIC_API_KEY。
  */
 import { WikiIndex, tokenize, normalizeText, filterQueryTokens } from './search.ts';
 import type { ContextItem } from './context.ts';
-import { renderContext } from './context.ts';
+import { renderContext, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
@@ -155,7 +155,10 @@ await index.load();
   check('定位: 站点根(location:"")', root !== null && root.url.startsWith('https://aipm.ac/') && root.url.endsWith('/'), root?.url);
   const missing = index.resolvePage('https://aipm.ac/no-such-page/');
   check('定位: 不存在页面 → null', missing === null);
-  const longText = index.resolvePage('https://aipm.ac/case/teardown-chatgpt/');
+  /* 这一页 2026-08 从 docs/case/teardown-chatgpt 迁到 docs/practice/case-analysis/
+     (AI-PM-Wiki/AIPM e30bb927),这里跟着换 —— 对着已经不存在的路径断言,只会
+     每条报告里都挂一条永远红的检查。它仍是超过 12000 字的一页,够触发截断。 */
+  const longText = index.resolvePage('https://aipm.ac/practice/case-analysis/chatgpt/');
   check('定位: 超长页 ≤12000 字截断', (longText?.text.length ?? 999999) <= 12_050, `len=${longText?.text.length}`);
 }
 
@@ -296,6 +299,19 @@ await index.load();
     'https://aipm.ac',
   );
   check('语境: 未知字段不进正文', !extra.includes('[object Object]'));
+
+  /* 按 kind 的必填字段:类型与长度由 schema 管,这条跨字段的规则在
+     contextItemProblem 里。空 selection 收下去的后果是渲染成「整页批注」——
+     一段并不存在的批注凭空出现在模型眼前。 */
+  check('语境校验: 划选有原文 → 收下', contextItemProblem(selection) === null);
+  const blankQuote = { ...selection, quote: '   ' };
+  check('语境校验: 划选只有空白原文 → 拒收', contextItemProblem(blankQuote) !== null, String(contextItemProblem(blankQuote)));
+
+  check('语境校验: 批注只有原文 → 收下', contextItemProblem({ ...annotation, body: '' }) === null);
+  check('语境校验: 批注只有正文(全页评论)→ 收下', contextItemProblem({ ...annotation, quote: '' }) === null);
+
+  const noText = { ...annotation, quote: '', body: '  ' };
+  check('语境校验: 批注原文与正文都空 → 拒收', contextItemProblem(noText) !== null, String(contextItemProblem(noText)));
 }
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);

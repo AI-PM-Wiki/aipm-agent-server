@@ -54,6 +54,29 @@ const KIND_LABEL: Record<ContextItem['kind'], string> = {
   annotation: '批注面板里的一条批注',
 };
 
+/**
+ * 这条语境条目本身站不站得住:返回 null 表示收得下,否则返回一句给人看的原因。
+ *
+ * 字段的类型与长度由 server.ts 的 schema 管;这里管的是**跨字段**的那条规则 ——
+ * `kind` 决定哪几个字段必须非空。README 的语境一节就是照这条写的:
+ * `selection` 必须有 `quote`(划选一定有原文),`annotation` 的 `quote` 与 `body`
+ * 至少要有一段(全页评论没有原文,只有正文)。
+ *
+ * 空 selection 收下去的后果不是报错,是**静默失真**:renderItem 见 quote 为空会
+ * 把这条渲染成「针对整页,不锚定任何一段文字」,一段并不存在的批注就凭空出现在
+ * 模型眼前。校验放在这里,渲染函数因此可以假定 quote 与 body 不会同时为空。
+ */
+export function contextItemProblem(item: ContextItem): string | null {
+  const quote = item.quote.trim();
+  const body = item.body.trim();
+  if (item.kind === 'selection') {
+    return quote.length > 0 ? null : 'selection 语境必须有 quote(划选的原文)';
+  }
+  return quote.length > 0 || body.length > 0
+    ? null
+    : 'annotation 语境的 quote 与 body 至少要有一段';
+}
+
 const VISIBILITY_LABEL: Record<ContextVisibility, string> = {
   public: '公开',
   private: '仅自己可见',
