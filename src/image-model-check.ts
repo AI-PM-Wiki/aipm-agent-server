@@ -25,7 +25,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from './config.ts';
 import { WikiIndex } from './search.ts';
-import { runAgent } from './agent.ts';
+import { IMAGE_UNSUPPORTED_MESSAGE, runAgent } from './agent.ts';
 import type { ContextItem } from './context.ts';
 
 let failed = 0;
@@ -37,6 +37,10 @@ function check(name: string, cond: boolean, detail = ''): void {
 /* 一张 1×1 的 PNG。用真图而不是随手编的 base64:假 API 收到什么,这里就比什么。 */
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** 400 里那句上游报错带的请求编号。它属于**上游细节**,界面上一律不该出现 ——
+    用例拿它当探针:出现了就说明上游原文漏到了用户眼前。 */
+const REJECT_REQUEST_ID = 'req_01REJECTPROBE';
 
 /** 一轮回话的 SSE 脚本:一句话就结束,agent 不必再要下一轮。 */
 const SSE_REPLY = [
@@ -68,6 +72,10 @@ interface Captured {
 
 const captured: Captured[] = [];
 
+/** 这一轮假 API 收不收图。收,就照 SSE 脚本正常结束;不收,回 400 —— 与真实 API
+    在模型不支持图像时给的东西同一形态。 */
+let rejectImages = false;
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
     let raw = '';
@@ -76,6 +84,19 @@ function readBody(req: IncomingMessage): Promise<string> {
     });
     req.on('end', () => resolve(raw));
   });
+}
+
+/** 请求体里的 image 内容块。 */
+function imagesIn(body: Record<string, unknown>): unknown[] {
+  const list = body.messages;
+  if (!Array.isArray(list)) return [];
+  const out: unknown[] = [];
+  for (const message of list as { content?: unknown }[]) {
+    if (Array.isArray(message.content)) {
+      out.push(...(message.content as { type?: string }[]).filter((b) => b.type === 'image'));
+    }
+  }
+  return out;
 }
 
 const stub = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -93,6 +114,19 @@ const stub = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (path.endsWith('/count_tokens')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ input_tokens: 1 }));
+      return;
+    }
+    if (rejectImages && imagesIn(body).length > 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: `messages.0.content.1.image.source.base64: This model does not support image inputs. Request id ${REJECT_REQUEST_ID}`,
+          },
+        }),
+      );
       return;
     }
     res.writeHead(200, {
@@ -224,6 +258,51 @@ const controlBlocks = (() => {
 })();
 check('对照:不带图像的位图不发 image 块', (controlBlocks ?? []).filter((b) => b.type === 'image').length === 0 && (controlBlocks ?? []).length > 0);
 check('对照:这一轮同样正常结束', second.ok, second.message ?? '');
+
+/* ================================================================
+   模型不收图:这一轮要能自己认出来,并给出一句可控的话
+   ================================================================ */
+
+/* 上游回 400 之后,CLI 自己会把图像块摘掉、重发一次 —— 那一轮因此**成功**结束,
+   而回答根本没看过那张图。整条消息流里唯一能看出这件事的是 CLI 为此发的合成
+   assistant 消息,下面这几条断言量的就是「我们认出了它,并且没有把上游原文
+   端给用户」。 */
+rejectImages = true;
+captured.length = 0;
+const rejectedAnswer: string[] = [];
+const rejected = await runAgent({
+  message: '这张图里画的是什么?',
+  history: [],
+  context: [bitmap],
+  config,
+  index,
+  callbacks: {
+    onDelta: (text) => rejectedAnswer.push(text),
+    onThinking: () => {},
+    onSources: () => {},
+  },
+});
+
+const rejectedCalls = captured.filter((c) => c.path.endsWith('/messages'));
+check('拒收的那一轮:第一次调用确实带着图', imagesIn(rejectedCalls[0]?.body ?? {}).length === 1, `调用 ${rejectedCalls.length} 次`);
+check('拒收的那一轮:没有当成成功', !rejected.ok, `ok=${rejected.ok} numTurns=${rejected.numTurns}`);
+check('拒收的那一轮:错误码是 image_unsupported', rejected.code === 'image_unsupported', String(rejected.code));
+check(
+  '拒收的那一轮:给用户的是一句能照着做的话',
+  rejected.message === IMAGE_UNSUPPORTED_MESSAGE && rejected.message.includes('去掉'),
+  String(rejected.message),
+);
+check(
+  '拒收的那一轮:上游原文没有跟着这句话出去',
+  !String(rejected.message).includes(REJECT_REQUEST_ID) &&
+    !/does not support image inputs/i.test(String(rejected.message)),
+  String(rejected.message),
+);
+check(
+  '拒收的那一轮:没有把「假装看过图」的回答发出去',
+  rejectedAnswer.join('') === '',
+  JSON.stringify(rejectedAnswer),
+);
 
 stub.close();
 

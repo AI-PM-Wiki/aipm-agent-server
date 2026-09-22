@@ -83,7 +83,7 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 | `sources` | `{query, results:[{title,url,snippet}]}` | 每次 search_wiki 返回 |
 | `delta` | `{text}` 增量 | 回答 token 块 |
 | `done` | `{usage, costUsd, durationMs, numTurns}` | 终帧后关闭 |
-| `error` | `{code: budget_exceeded\|max_turns\|model_error\|internal, message}` | 随后关闭 |
+| `error` | `{code: budget_exceeded\|max_turns\|model_error\|image_unsupported\|internal, message}` | 随后关闭 |
 
 ### 语境(`context`)
 
@@ -140,8 +140,27 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 
 预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
 `code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内
-`error` 帧只有上表 4 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
+`error` 帧只有上表 5 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
 客户端断连即 abort,停止计费。
+
+### 模型不收图时的那一帧(`image_unsupported`)
+
+模型不收图像时,上游的 400 **不会**走到这里:CLI 自己接住它,把消息里的图像块换成
+一段说明文字、重发一次,于是这一轮**成功**结束 —— 而回答根本没看过那张图。用户在
+界面上看不到任何提示,以为模型看过图了。
+
+整条消息流里唯一能看出这件事的,是 CLI 为此发的那条合成 assistant 消息(模型名
+`<synthetic>`,带 `error: invalid_request`,正文说图没能处理、已被摘掉)。
+`src/agent.ts` 的 `isImageRemovalNotice` 认的就是它:这一轮确实带了图、错误类别是
+`invalid_request`、正文说的是图被摘掉 —— 三个条件同时成立才算。认出之后这一轮就
+地中止,返回 `image_unsupported`,于是:
+
+- 前端按 code 取一句能照着做的文案(「去掉对话框上方的图片语境后再问一次」),
+  界面上不出现任何上游报错原文与请求编号;
+- 那段「假装看过图」的回答不会被发出去 —— 中止发生在它开始生成之前。
+
+三个条件里少任何一个都不动手:把别的 400 说成「模型不收图」会把用户引到一条走不通
+的路上,而漏认的后果只是回到原本那种「悄悄没看图」。
 
 ## 部署注意
 

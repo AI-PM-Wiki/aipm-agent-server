@@ -10,6 +10,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
   McpServerConfig,
   Options,
+  SDKMessage,
   SDKPartialAssistantMessage,
   SDKResultMessage,
   SDKUserMessage,
@@ -28,6 +29,7 @@ export type AgentErrorCode =
   | 'budget_exceeded'
   | 'max_turns'
   | 'model_error'
+  | 'image_unsupported'
   | 'internal';
 
 export interface AgentCallbacks {
@@ -247,6 +249,37 @@ export function mapResultToErrorCode(result: SDKResultMessage): {
   }
 }
 
+/**
+ * 上游拒收图像时,交给用户的那句话。
+ *
+ * 上游报错里可能带着自己的措辞与请求编号,那是**上游细节**,不进这一句 —— 界面
+ * 只按 error 帧的 code 取文案(见 chat-widget.js 的 ERROR_TEXT),所以这里写什么
+ * 与上游说了什么无关;这一句的职责只有一个:让用户知道下一步做什么。
+ */
+export const IMAGE_UNSUPPORTED_MESSAGE = '当前模型不接受图像输入,去掉语境里的图片后再问一次。';
+
+/**
+ * 上游把这一轮里的图摘掉了没有。
+ *
+ * 模型不收图时,报错不会走到调用方:CLI 自己接住了那个 400,把消息里的图像块换成
+ * 一段说明文字、重发一次,于是这一轮**成功**结束,而回答根本没看过那张图。整条
+ * 消息流里唯一能看出这件事的,是 CLI 为此发的那条**合成** assistant 消息(模型名
+ * 是 `<synthetic>`,带 `error: invalid_request`,正文说图没能处理、已被摘掉)。
+ *
+ * 三个条件同时成立才认:这一轮确实带了图、错误类别是 invalid_request、正文说的是
+ * 「图没能处理、已被摘掉」。少任何一条都不动手 —— 把别的 400 说成「模型不收图」
+ * 会把用户引到一条走不通的路上,而漏认的后果只是回到原本那种「悄悄没看图」。
+ */
+export function isImageRemovalNotice(message: SDKMessage, carriedImages: boolean): boolean {
+  if (!carriedImages || message.type !== 'assistant') return false;
+  if (message.error !== 'invalid_request') return false;
+  if (message.message.model !== '<synthetic>') return false;
+  const text = message.message.content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('\n');
+  return /image/i.test(text) && /could not be processed/i.test(text) && /removed/i.test(text);
+}
+
 /** 增量文本抽取:content_block_delta 本身是增量,按 block 索引维护状态。 */
 class StreamTextExtractor {
   private readonly kinds = new Map<number, string>();
@@ -283,11 +316,23 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
   const startedAt = Date.now();
   const { prompt, options } = buildAgentOptions(input);
   const extractor = new StreamTextExtractor();
+  const carriedImages = contextImages(input.context ?? []).length > 0;
   let lastResult: SDKResultMessage | null = null;
   let initInfo: { tools: string[]; mcpServers: { name: string; status: string }[]; model: string } | null = null;
 
   try {
     for await (const message of query({ prompt, options })) {
+      /* 上游把这一轮里的图摘掉了:接着跑只会得到一段「假装看过图」的回答。就地
+         停下来,由界面按 image_unsupported 告诉用户去掉图片重问。 */
+      if (isImageRemovalNotice(message, carriedImages)) {
+        options.abortController?.abort();
+        return {
+          ok: false,
+          code: 'image_unsupported',
+          message: IMAGE_UNSUPPORTED_MESSAGE,
+          durationMs: Date.now() - startedAt,
+        };
+      }
       switch (message.type) {
         case 'system':
           if (message.subtype === 'init') {
