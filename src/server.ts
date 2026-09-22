@@ -17,27 +17,28 @@ import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
-import { CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, contextItemProblem } from './context.ts';
+import { CHART_KINDS, CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
 
 /**
- * 语境条目:用户提问时正在读的东西(划选的一段原文 / 批注面板里的一条批注)。
+ * 语境条目:用户提问时正在读的东西(划选的一段原文 / 批注面板里的一条批注 /
+ * 正文里的一张图)。
  *
  * `visibility` 的枚举里没有 `local` —— 「仅本机」的批注只存在浏览器里,送进对话
  * 等于把它发到本服务并进入模型上下文。带上它的请求在这里就被拒(400),不会走到
  * 模型那一步。前端那边也有独立的一道(见主仓库 docs/_static/js/context-item.js
  * 的 isDeliverable)。
  *
- * 字段类型与长度由这里管,**跨字段的必填规则**(kind 决定 quote / body 谁不能为空)
- * 由 contextItemProblem 管,作为 refinement 挂在同一个 schema 上 —— 于是 HTTP 那
- * 一层只剩「400」与「继续」两种结果,校验不会漏在 schema 之外。
+ * 字段类型与长度由这里管,**跨字段的必填规则**(kind 决定 quote / body / source
+ * 谁不能为空)由 contextItemProblem 管,作为 refinement 挂在同一个 schema 上 ——
+ * 于是 HTTP 那一层只剩「400」与「继续」两种结果,校验不会漏在 schema 之外。
  */
 const ContextItemSchema = z
   .object({
-    kind: z.enum(['selection', 'annotation']),
+    kind: z.enum(['selection', 'annotation', 'chart']),
     page: z.string().min(1).max(CONTEXT_LIMITS.page),
     title: z.string().max(CONTEXT_LIMITS.title).default(''),
     quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
@@ -45,6 +46,10 @@ const ContextItemSchema = z
     suffix: z.string().max(CONTEXT_LIMITS.edge).default(''),
     body: z.string().max(CONTEXT_LIMITS.body).default(''),
     color: z.string().max(CONTEXT_LIMITS.color).default(''),
+    /* 空串 = 不是图表;三个取值与 context.ts 的 CHART_KINDS 同一组。认不出的
+       取值由 zod 在这里就挡下,不必等 contextItemProblem。 */
+    chart: z.enum(['', ...CHART_KINDS]).default(''),
+    source: z.string().max(CONTEXT_LIMITS.source).default(''),
     visibility: z.enum(['public', 'private']).default('public'),
   })
   .superRefine((item, ctx) => {
@@ -348,7 +353,7 @@ export function createApp(deps: ServerDeps) {
           'bad_request',
           '请求体格式不正确:需要 {message, history?, context?};' +
             'context 里每条要有 kind 与 page,划选必须有原文,批注的原文与正文' +
-            '至少要有一段,可见范围只接受 public / private',
+            '至少要有一段,图表要有种类与取到的文字,可见范围只接受 public / private',
           corsHeaders,
         );
         return;

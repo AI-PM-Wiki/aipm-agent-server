@@ -252,6 +252,8 @@ await index.load();
     suffix: '它由检索器与生成器两段组成。',
     body: '',
     color: '',
+    chart: '',
+    source: '',
     visibility: 'public',
   };
   const annotation: ContextItem = {
@@ -263,7 +265,22 @@ await index.load();
     suffix: '',
     body: '这里说的召回率是 top-k 口径。',
     color: 'blue',
+    chart: '',
+    source: '',
     visibility: 'private',
+  };
+  const chart: ContextItem = {
+    kind: 'chart',
+    page: '/ai/rag/',
+    title: '检索增强生成',
+    quote: '',
+    prefix: '',
+    suffix: '',
+    body: '',
+    color: '',
+    chart: 'mermaid',
+    source: 'flowchart TB\n    source["源文档"] --> chunk["切块"]',
+    visibility: 'public',
   };
 
   check('语境: 空数组 → 空串(不带 context 的请求逐字回到原 prompt)', renderContext([], 'https://aipm.ac') === '');
@@ -291,6 +308,25 @@ await index.load();
   const noSlashBase = renderContext([selection], 'https://aipm.ac/');
   check('语境: 站点基址带尾斜杠不拼出双斜杠', noSlashBase.includes('https://aipm.ac/ai/rag/'));
 
+  /* 图表:mermaid 送源码、SVG 送图里的字、位图送替代文本,三种在前端取好,
+     这边只按种类换名字与提示——模型看不到图,得知道自己手里是什么。 */
+  const mermaid = renderContext([chart], 'https://aipm.ac');
+  check('语境: 图表有自己的名目', mermaid.includes('[语境 1 · 用户正在读的一张图]'), mermaid.slice(0, 60));
+  check('语境: 图表带页面的标题与链接', mermaid.includes('页面: 检索增强生成 — https://aipm.ac/ai/rag/'));
+  check('语境: Mermaid 图标出源码', mermaid.includes('图类型: Mermaid 图(源码见下)') && mermaid.includes('源码: flowchart TB'));
+  check('语境: 图表不走引文与批注那两行', !mermaid.includes('原文:') && !mermaid.includes('批注正文:'));
+
+  const svg = renderContext([{ ...chart, chart: 'svg', source: '入库侧 / 查询处理 / 重排' }], 'https://aipm.ac');
+  check('语境: SVG 图标出图里的文字', svg.includes('图类型: SVG 图') && svg.includes('图里的文字: 入库侧'));
+  check('语境: SVG 那行说明图形本身没有送过来', svg.includes('图形本身没有送过来'));
+
+  const image = renderContext([{ ...chart, chart: 'image', source: '页面上的第 1 张图(位图, 作者没有写替代文本)。' }], 'https://aipm.ac');
+  check('语境: 位图标出说明', image.includes('图类型: 位图') && image.includes('说明: 页面上的第 1 张图'));
+  check('语境: 位图那行说明看不到图像内容', image.includes('看不到图像内容'));
+
+  const multi = renderContext([selection, chart], 'https://aipm.ac');
+  check('语境: 图表与别的条目一起编号递增', multi.includes('[语境 2 · 用户正在读的一张图]'));
+
   /* 语境的渲染只认 ContextItem 里的字段 —— 前端的内部字段(id / label / excerpt)
      若混进来,必须原样出现在【页面】那一行之外的地方才算漏。这里只锁「不崩」与
      「不把对象渲染成 [object Object]」。 */
@@ -312,6 +348,14 @@ await index.load();
 
   const noText = { ...annotation, quote: '', body: '  ' };
   check('语境校验: 批注原文与正文都空 → 拒收', contextItemProblem(noText) !== null, String(contextItemProblem(noText)));
+
+  /* 图表:认不出的种类与空 source 都拒收。空 source 渲染出来是一张没有名字、
+     也没有内容的图 —— 模型只知道「用户在读某页上的一张图」,连是哪张都不知道。 */
+  check('语境校验: 图表带种类与内容 → 收下', contextItemProblem(chart) === null, String(contextItemProblem(chart)));
+  const unknownChart = { ...chart, chart: 'jpg' } as unknown as ContextItem;
+  check('语境校验: 认不出的图表种类 → 拒收', contextItemProblem(unknownChart) !== null, String(contextItemProblem(unknownChart)));
+  const emptySource = { ...chart, source: '   ' };
+  check('语境校验: 图表内容为空 → 拒收', contextItemProblem(emptySource) !== null, String(contextItemProblem(emptySource)));
 }
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);

@@ -87,8 +87,8 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 ### 语境(`context`)
 
 请求体可以是 `{message, history?, context?}`。`context` 是「用户此刻正在读的东西」——
-正文里划选的一段原文,或批注面板里的一条批注,由前端随提问带上(见主仓库
-`docs/_static/js/context-item.js` 与 AIPM#107):
+正文里划选的一段原文、批注面板里的一条批注,或正文里的一张图,由前端随提问带上
+(见主仓库 `docs/_static/js/context-item.js`、`chart-context.js` 与 AIPM#107):
 
 ```json
 {
@@ -97,12 +97,23 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
   "title": "检索增强生成",
   "quote": "被划的那段原文",
   "prefix": "上文…", "suffix": "…下文",
-  "body": "", "color": "", "visibility": "public"
+  "body": "", "color": "", "chart": "", "source": "", "visibility": "public"
 }
 ```
 
-- `kind: "selection"` 必须有 `quote`;`kind: "annotation"` 的 `quote`(被划的原文)与
-  `body`(批注正文)至少要有一段,全页评论(`quote` 为空)也走这一支。
+按 `kind` 分三支,`chart` 与 `source` 只有图表用得上:
+
+| `kind` | 必填 | 说明 |
+|---|---|---|
+| `selection` | `quote` | 正文里划的一段原文 |
+| `annotation` | `quote` 或 `body` 至少一段 | 批注面板里的一条批注;全页评论只有 `body` |
+| `chart` | `chart`(取值 `mermaid` / `svg` / `image`)与 `source` | 正文里的一张图 |
+
+`source` 是**前端取好的文字**,不是图的地址:mermaid 是它的源码,SVG 是图里写的字,
+位图是作者写的替代文本。取不到时前端写一句说明(第几张、什么图、为什么没有),
+而不是送一条空语境 —— 所以服务端这边看到空 `source` 直接拒收。服务端不解析任何
+图像格式,也不带图像内容。
+
 - 最多 `CONTEXT_MAX_ITEMS`(4)条,每字段长度上限见 `src/context.ts` 的 `CONTEXT_LIMITS`;
   渲染成一段文本块压在问题之前(`src/context.ts` 的 `renderContext`),模型据此知道
   这段话出自哪一页,要看全文再用 `read_wiki_page` 读语境里给出的那个链接。
@@ -110,7 +121,9 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
   对话等于把它发到本服务并进入模型上下文 —— 带 `local` 的请求在这里就被 400 拒掉,
   前端也根本不会产出这种语境,两道闸各自独立。
 - 不带 `context` 的请求(老客户端、脚本调用)行为与加这个字段之前完全相同:空数组是
-  缺省值,渲染结果为空串,prompt 逐字回到原样。
+  缺省值,渲染结果为空串,prompt 逐字回到原样。反过来,认识 `chart` 这个 `kind` 需要
+  配套的服务端版本:**旧版服务端会以 400 拒掉带 `kind: "chart"` 的请求**(它的 kind
+  枚举里没有这一项),不像多余的字段那样被丢弃。两仓库的 gitlink 因此要一起走。
 
 预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
 `code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内

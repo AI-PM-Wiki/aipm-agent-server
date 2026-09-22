@@ -1,9 +1,14 @@
 /**
- * 对话语境:用户此刻正在读的东西 —— 划选的一段原文,或批注面板里的一条批注。
+ * 对话语境:用户此刻正在读的东西 —— 划选的一段原文,批注面板里的一条批注,或者
+ * 正文里的一张图(mermaid / SVG / 位图)。
  *
  * 前端在提问时随请求带上(POST /api/chat 的 `context`),这里负责渲染:拼成一段
  * 固定形态的文本块插在问题之前,模型据此知道「这段话出自哪一页」,要看该页其余
  * 内容时再用 mcp__wiki__read_wiki_page 读语境里给出的那个链接。
+ *
+ * 图表的文字由前端取好再送过来(`source`):mermaid 是它的源码,SVG 是图里写的
+ * 字,位图是作者写的替代文本 —— 取不到时前端写一句说明,不会送一条空语境。本文件
+ * 只渲染,不解析任何图像格式。
  *
  * 本文件刻意零依赖(与 search.ts / history.ts 同一路数):渲染规则是纯函数,
  * `node src/unit-check.ts` 不需要 npm 包就能直接跑断言。校验用的 zod schema 与
@@ -18,12 +23,14 @@
 /** 一条提问最多带几条语境。 */
 export const CONTEXT_MAX_ITEMS = 4;
 
-/** 各字段的字符上限,server.ts 的 schema 与前端 context-item.js 共用同一组数字。 */
+/** 各字段的字符上限,server.ts 的 schema 与前端 context-item.js 共用同一组数字。
+    chart 的取值是三个枚举值,长度由 schema 的 z.enum 管,不占这里的额度。 */
 export const CONTEXT_LIMITS = {
   page: 512,
   title: 200,
   quote: 4000,
   body: 4000,
+  source: 4000,
   edge: 200,
   color: 32,
 } as const;
@@ -31,9 +38,14 @@ export const CONTEXT_LIMITS = {
 /** 批注语境的可见范围。**没有 local**:见文件头。 */
 export type ContextVisibility = 'public' | 'private';
 
+/** 图表的种类。与前端的 CHART_KINDS 同一组取值。 */
+export const CHART_KINDS = ['mermaid', 'svg', 'image'] as const;
+export type ChartKind = (typeof CHART_KINDS)[number];
+
 export interface ContextItem {
-  /** selection = 正文里划的一段话;annotation = 批注面板里的一条批注。 */
-  kind: 'selection' | 'annotation';
+  /** selection = 正文里划的一段话;annotation = 批注面板里的一条批注;
+      chart = 正文里的一张图。 */
+  kind: 'selection' | 'annotation' | 'chart';
   /** 站内路径,如 `/ai/rag/`。 */
   page: string;
   title: string;
@@ -46,12 +58,32 @@ export interface ContextItem {
   body: string;
   /** annotation 专有:色板 id。 */
   color: string;
+  /** chart 专有:图的种类。其余 kind 是空串。 */
+  chart: ChartKind | '';
+  /** chart 专有:从这张图里取到的文字。 */
+  source: string;
   visibility: ContextVisibility;
 }
 
 const KIND_LABEL: Record<ContextItem['kind'], string> = {
   selection: '用户划选的原文',
   annotation: '批注面板里的一条批注',
+  chart: '用户正在读的一张图',
+};
+
+/** 图表的类型行。带上「这边有什么、没有什么」——模型看不到图,得知道自己手里
+    是源码、是图里的字,还是一句说明。 */
+const CHART_LABEL: Record<ChartKind, string> = {
+  mermaid: 'Mermaid 图(源码见下)',
+  svg: 'SVG 图(只有图里写的文字,图形本身没有送过来)',
+  image: '位图(只有文字说明,看不到图像内容)',
+};
+
+/** chart 专有的那一行用哪个名字。 */
+const CHART_TEXT_LABEL: Record<ChartKind, string> = {
+  mermaid: '源码',
+  svg: '图里的文字',
+  image: '说明',
 };
 
 /**
@@ -60,13 +92,23 @@ const KIND_LABEL: Record<ContextItem['kind'], string> = {
  * 字段的类型与长度由 server.ts 的 schema 管;这里管的是**跨字段**的那条规则 ——
  * `kind` 决定哪几个字段必须非空。README 的语境一节就是照这条写的:
  * `selection` 必须有 `quote`(划选一定有原文),`annotation` 的 `quote` 与 `body`
- * 至少要有一段(全页评论没有原文,只有正文)。
+ * 至少要有一段(全页评论没有原文,只有正文),`chart` 的 `chart` 得是认识的种类、
+ * `source` 得有内容。
  *
  * 空 selection 收下去的后果不是报错,是**静默失真**:renderItem 见 quote 为空会
  * 把这条渲染成「针对整页,不锚定任何一段文字」,一段并不存在的批注就凭空出现在
- * 模型眼前。校验放在这里,渲染函数因此可以假定 quote 与 body 不会同时为空。
+ * 模型眼前。图表那边同理:空 source 渲染出来是一张没有名字也没有内容的图。
+ * 校验放在这里,渲染函数因此可以假定该有的字段不会缺席。
  */
 export function contextItemProblem(item: ContextItem): string | null {
+  if (item.kind === 'chart') {
+    if (!(CHART_KINDS as readonly string[]).includes(item.chart)) {
+      return `chart 语境必须有 chart,取值限于 ${CHART_KINDS.join(' / ')}`;
+    }
+    return item.source.trim().length > 0
+      ? null
+      : 'chart 语境的 source 必须有内容(取到的文字,或一句说明为什么没有)';
+  }
   const quote = item.quote.trim();
   const body = item.body.trim();
   if (item.kind === 'selection') {
@@ -92,6 +134,12 @@ function renderItem(item: ContextItem, index: number, siteBase: string): string 
   const lines = [`[语境 ${index} · ${KIND_LABEL[item.kind]}]`];
   const title = item.title.trim();
   lines.push(`页面: ${title.length > 0 ? `${title} — ` : ''}${pageUrl(siteBase, item.page)}`);
+  if (item.kind === 'chart') {
+    const chart = item.chart as ChartKind;
+    lines.push(`图类型: ${CHART_LABEL[chart]}`);
+    lines.push(`${CHART_TEXT_LABEL[chart]}: ${item.source}`);
+    return lines.join('\n');
+  }
   if (item.kind === 'annotation') {
     lines.push(`可见范围: ${VISIBILITY_LABEL[item.visibility]}`);
   }

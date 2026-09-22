@@ -41,6 +41,8 @@ const selection = {
   suffix: '它由两段组成。',
   body: '',
   color: '',
+  chart: '',
+  source: '',
   visibility: 'public',
 };
 
@@ -52,6 +54,16 @@ const annotation = {
   body: '这里的召回率是 top-k 口径。',
   color: 'blue',
   visibility: 'private',
+};
+
+/** 一条合法的图表语境。 */
+const chart = {
+  ...selection,
+  kind: 'chart',
+  quote: '',
+  suffix: '',
+  chart: 'mermaid',
+  source: 'flowchart TB\n    source["源文档"] --> chunk["切块"]',
 };
 
 const chatBody = (context: unknown) => ({ message: '这段话是什么意思?', context });
@@ -75,9 +87,15 @@ function reasonOf(body: unknown): string | null {
 
   check('schema: 不带 context(老客户端) → 收下', reasonOf({ message: '你好' }) === null);
 
+  check('schema: 图表(Mermaid 源码) → 收下', reasonOf(chatBody([chart])) === null, reasonOf(chatBody([chart])) ?? '');
+  check('schema: 图表(SVG 与位图) → 收下', reasonOf(chatBody([{ ...chart, chart: 'svg' }, { ...chart, chart: 'image' }])) === null);
+
   const parsed = ChatBodySchema.safeParse({ message: '你好', context: [selection] });
   const wire = parsed.success ? parsed.data.context[0] : undefined;
-  check('schema: 缺省值把可选字段补成空串', wire !== undefined && wire.prefix === '简单说,' && wire.body === '' && wire.color === '');
+  check('schema: 缺省值把可选字段补成空串', wire !== undefined && wire.prefix === '简单说,' && wire.body === '' && wire.color === '' && wire.chart === '' && wire.source === '');
+
+  const chartWire = ChatBodySchema.safeParse({ message: '你好', context: [chart] });
+  check('schema: 图表收下之后种类与内容都在', chartWire.success && chartWire.data.context[0]!.chart === 'mermaid' && chartWire.data.context[0]!.source.startsWith('flowchart TB'));
 
   const two = ChatBodySchema.safeParse(chatBody([selection, { ...annotation, visibility: 'public' }]));
   check('schema: 多条按原顺序保留', two.success && two.data.context.length === 2 && two.data.context[1]!.kind === 'annotation');
@@ -94,14 +112,29 @@ function reasonOf(body: unknown): string | null {
   const local = { ...selection, visibility: 'local' };
   check('schema: 仅本机(visibility: local)被拒', reasonOf(chatBody([local])) !== null, reasonOf(chatBody([local])) ?? '');
 
+  const chartLocal = { ...chart, visibility: 'local' };
+  check('schema: 仅本机的图表同样被拒', reasonOf(chatBody([chartLocal])) !== null, reasonOf(chatBody([chartLocal])) ?? '');
+
+  const chartNoSource = { ...chart, source: '   ' };
+  check('schema: 图表内容为空被拒', /chart 语境的 source 必须有内容/.test(reasonOf(chatBody([chartNoSource])) ?? ''), reasonOf(chatBody([chartNoSource])) ?? '');
+
+  const chartNoKind = { ...chart, chart: '' };
+  check('schema: 图表没有种类被拒', /chart 语境必须有 chart/.test(reasonOf(chatBody([chartNoKind])) ?? ''), reasonOf(chatBody([chartNoKind])) ?? '');
+
+  const chartBadKind = { ...chart, chart: 'jpg' };
+  check('schema: 图表种类不认识被拒', reasonOf(chatBody([chartBadKind])) !== null, reasonOf(chatBody([chartBadKind])) ?? '');
+
   const tooMany = Array.from({ length: CONTEXT_MAX_ITEMS + 1 }, () => selection);
   check(`schema: 超过 ${CONTEXT_MAX_ITEMS} 条被拒`, reasonOf(chatBody(tooMany)) !== null);
 
   const tooLong = { ...selection, quote: 'x'.repeat(CONTEXT_LIMITS.quote + 1) };
   check('schema: 超长原文被拒', reasonOf(chatBody([tooLong])) !== null);
 
+  const chartTooLong = { ...chart, source: 'x'.repeat(CONTEXT_LIMITS.source + 1) };
+  check('schema: 超长图表内容被拒', reasonOf(chatBody([chartTooLong])) !== null);
+
   check('schema: 空 page 被拒', reasonOf(chatBody([{ ...selection, page: '' }])) !== null);
-  check('schema: 不认识的 kind 被拒', reasonOf(chatBody([{ ...selection, kind: 'chart' }])) !== null);
+  check('schema: 不认识的 kind 被拒', reasonOf(chatBody([{ ...selection, kind: 'comment' }])) !== null);
 }
 
 // ---- HTTP:同一组坏请求停在 400 ----
@@ -124,9 +157,13 @@ const rejected: Array<[string, unknown]> = [
   ['selection 的空原文', chatBody([{ ...selection, quote: '   ' }])],
   ['annotation 原文与正文都空', chatBody([{ ...annotation, quote: '', body: '' }])],
   ['仅本机(visibility: local)', chatBody([{ ...selection, visibility: 'local' }])],
+  ['仅本机的图表', chatBody([{ ...chart, visibility: 'local' }])],
+  ['图表内容为空', chatBody([{ ...chart, source: '   ' }])],
+  ['图表没有种类', chatBody([{ ...chart, chart: '' }])],
+  ['图表种类不认识', chatBody([{ ...chart, chart: 'jpg' }])],
   [`超过 ${CONTEXT_MAX_ITEMS} 条`, chatBody(Array.from({ length: CONTEXT_MAX_ITEMS + 1 }, () => selection))],
   ['空 page', chatBody([{ ...selection, page: '' }])],
-  ['不认识的 kind', chatBody([{ ...selection, kind: 'chart' }])],
+  ['不认识的 kind', chatBody([{ ...selection, kind: 'comment' }])],
   ['请求体不是 JSON', '{'],
 ];
 
