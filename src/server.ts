@@ -17,10 +17,30 @@ import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
+import { CONTEXT_LIMITS, CONTEXT_MAX_ITEMS } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
+
+/**
+ * 语境条目:用户提问时正在读的东西(划选的一段原文 / 批注面板里的一条批注)。
+ *
+ * `visibility` 的枚举里没有 `local` —— 「仅本机」的批注只存在浏览器里,送进对话
+ * 等于把它发到本服务并进入模型上下文。带上它的请求在这里就被拒(400),不会走到
+ * 模型那一步。前端的 forAnnotation 也不产出这种语境,两道闸各自独立。
+ */
+const ContextItemSchema = z.object({
+  kind: z.enum(['selection', 'annotation']),
+  page: z.string().min(1).max(CONTEXT_LIMITS.page),
+  title: z.string().max(CONTEXT_LIMITS.title).default(''),
+  quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
+  prefix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+  suffix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+  body: z.string().max(CONTEXT_LIMITS.body).default(''),
+  color: z.string().max(CONTEXT_LIMITS.color).default(''),
+  visibility: z.enum(['public', 'private']).default('public'),
+});
 
 const ChatBodySchema = z.object({
   message: z.string().min(1).max(10_000),
@@ -32,6 +52,8 @@ const ChatBodySchema = z.object({
       }),
     )
     .default([]),
+  /* 缺省为空数组:老客户端不带这个字段,拿到的行为与加它之前完全一致。 */
+  context: z.array(ContextItemSchema).max(CONTEXT_MAX_ITEMS).default([]),
 });
 
 interface ServerDeps {
@@ -307,7 +329,15 @@ export function createApp(deps: ServerDeps) {
       }
       if (parsed === null) {
         budget.release(estimate);
-        sendError(req, res, 400, 'bad_request', '请求体格式不正确:需要 {message, history?}', corsHeaders);
+        sendError(
+          req,
+          res,
+          400,
+          'bad_request',
+          '请求体格式不正确:需要 {message, history?, context?};' +
+            'context 里每条要有 kind 与 page,批注语境只接受 public / private',
+          corsHeaders,
+        );
         return;
       }
 
@@ -324,7 +354,7 @@ export function createApp(deps: ServerDeps) {
           // 客户端已断开,忽略
         }
       };
-      safeWrite('ready', { requestId });
+      safeWrite('ready', { requestId, contextCount: parsed.context.length });
       const stopHeartbeat = startHeartbeat(res);
 
       let answerChars = 0;
@@ -347,6 +377,7 @@ export function createApp(deps: ServerDeps) {
         outcome = await runAgent({
           message: parsed.message,
           history,
+          context: parsed.context,
           config,
           index,
           signal: abortController.signal,
@@ -404,7 +435,7 @@ export function createApp(deps: ServerDeps) {
             durationMs: outcome.durationMs,
             numTurns: outcome.numTurns,
           });
-          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
+          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, contextCount: parsed.context.length, dailyLeftUsd: budget.remainingUsd });
         } else if (timedOut) {
           // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
           safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });

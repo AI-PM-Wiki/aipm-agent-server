@@ -66,7 +66,7 @@ npm install          # 装依赖(含 SDK 自带 CLI 原生二进制)
 npm run build        # tsc → dist/
 npm start            # 起服务,监听 HOST:PORT(默认 127.0.0.1:8787)
 npm run smoke        # 检索冒烟:BM25 top-5 目检(零依赖,也可 node src/smoke-search.ts)
-npm run unit-check   # 无依赖单元检查(分词/BM25/定位/限流等,需网络访问线上索引)
+npm run unit-check   # 无依赖单元检查(分词/BM25/定位/语境渲染/限流等,需网络访问线上索引)
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
 ```
@@ -77,11 +77,39 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 
 | event | data | 时机 |
 |---|---|---|
-| `ready` | `{requestId}` | 流打开 |
+| `ready` | `{requestId, contextCount}` | 流打开 |
 | `sources` | `{query, results:[{title,url,snippet}]}` | 每次 search_wiki 返回 |
 | `delta` | `{text}` 增量 | 回答 token 块 |
 | `done` | `{usage, costUsd, durationMs, numTurns}` | 终帧后关闭 |
 | `error` | `{code: budget_exceeded\|max_turns\|model_error\|internal, message}` | 随后关闭 |
+
+### 语境(`context`)
+
+请求体可以是 `{message, history?, context?}`。`context` 是「用户此刻正在读的东西」——
+正文里划选的一段原文,或批注面板里的一条批注,由前端随提问带上(见主仓库
+`docs/_static/js/context-item.js` 与 AIPM#107):
+
+```json
+{
+  "kind": "selection",
+  "page": "/ai/rag/",
+  "title": "检索增强生成",
+  "quote": "被划的那段原文",
+  "prefix": "上文…", "suffix": "…下文",
+  "body": "", "color": "", "visibility": "public"
+}
+```
+
+- `kind: "selection"` 必须有 `quote`;`kind: "annotation"` 的 `quote`(被划的原文)与
+  `body`(批注正文)至少要有一段,全页评论(`quote` 为空)也走这一支。
+- 最多 `CONTEXT_MAX_ITEMS`(4)条,每字段长度上限见 `src/context.ts` 的 `CONTEXT_LIMITS`;
+  渲染成一段文本块压在问题之前(`src/context.ts` 的 `renderContext`),模型据此知道
+  这段话出自哪一页,要看全文再用 `read_wiki_page` 读语境里给出的那个链接。
+- **`visibility` 只接受 `public` / `private`**。三态里的「仅本机」只存在浏览器里,送进
+  对话等于把它发到本服务并进入模型上下文 —— 带 `local` 的请求在这里就被 400 拒掉,
+  前端也根本不会产出这种语境,两道闸各自独立。
+- 不带 `context` 的请求(老客户端、脚本调用)行为与加这个字段之前完全相同:空数组是
+  缺省值,渲染结果为空串,prompt 逐字回到原样。
 
 预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
 `code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内
