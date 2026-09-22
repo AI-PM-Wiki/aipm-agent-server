@@ -17,7 +17,7 @@ import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
-import { CHART_KINDS, CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, contextItemProblem } from './context.ts';
+import { CHART_KINDS, CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, RASTER_MEDIA_TYPES, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
@@ -50,6 +50,12 @@ const ContextItemSchema = z
        取值由 zod 在这里就挡下,不必等 contextItemProblem。 */
     chart: z.enum(['', ...CHART_KINDS]).default(''),
     source: z.string().max(CONTEXT_LIMITS.source).default(''),
+    /* 位图那份图像(base64)与它的媒体类型。两个默认都是空串:不带图像的文字语境
+       (mermaid 源码 / SVG 里的字 / 位图的替代文本)与加这条通路之前逐字相同。
+       长度上限就是尺寸上限,与前端 chart-context.js 的 IMAGE_MAX_BYTES 对应;
+       两者成对与否、只有 image 能带 —— 这些是跨字段规则,在 contextItemProblem 里。 */
+    mediaType: z.enum(['', ...RASTER_MEDIA_TYPES]).default(''),
+    imageData: z.string().max(CONTEXT_LIMITS.imageData).default(''),
     visibility: z.enum(['public', 'private']).default('public'),
   })
   .superRefine((item, ctx) => {
@@ -353,7 +359,8 @@ export function createApp(deps: ServerDeps) {
           'bad_request',
           '请求体格式不正确:需要 {message, history?, context?};' +
             'context 里每条要有 kind 与 page,划选必须有原文,批注的原文与正文' +
-            '至少要有一段,图表要有种类与取到的文字,可见范围只接受 public / private',
+            '至少要有一段,图表要有种类与取到的文字,可见范围只接受 public / private;' +
+            '位图的 mediaType 与 imageData 要么都给要么都不给,类型限于 PNG / JPEG / WebP / GIF',
           corsHeaders,
         );
         return;

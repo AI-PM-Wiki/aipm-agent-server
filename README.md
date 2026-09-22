@@ -68,6 +68,7 @@ npm start            # 起服务,监听 HOST:PORT(默认 127.0.0.1:8787)
 npm run smoke        # 检索冒烟:BM25 top-5 目检(零依赖,也可 node src/smoke-search.ts)
 npm run unit-check   # 无依赖单元检查(分词/BM25/定位/语境渲染与校验/限流等,需网络访问线上索引)
 npm run context-check   # /api/chat 的语境校验自检(要 npm 依赖,不联网):schema 断言 + 真发 HTTP 断言坏请求停在 400
+npm run image-check     # 位图语境的动态回归(要 npm 依赖,不联网):假模型 API + 真跑一轮,断言模型请求里有 image 内容块
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
 ```
@@ -97,7 +98,8 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
   "title": "检索增强生成",
   "quote": "被划的那段原文",
   "prefix": "上文…", "suffix": "…下文",
-  "body": "", "color": "", "chart": "", "source": "", "visibility": "public"
+  "body": "", "color": "", "chart": "", "source": "",
+  "mediaType": "", "imageData": "", "visibility": "public"
 }
 ```
 
@@ -111,15 +113,26 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 
 `source` 是**前端取好的文字**,不是图的地址:mermaid 是它的源码,SVG 是图里写的字,
 位图是作者写的替代文本。取不到时前端写一句说明(第几张、什么图、为什么没有),
-而不是送一条空语境 —— 所以服务端这边看到空 `source` 直接拒收。服务端不解析任何
-图像格式,也不带图像内容。
+而不是送一条空语境 —— 所以服务端这边看到空 `source` 直接拒收。
+
+`mediaType` 与 `imageData` 只有 `chart: "image"` 用得上,是**图像本身**:base64 的
+原始字节与它的媒体类型(`image/png` / `image/jpeg` / `image/webp` / `image/gif`)。
+位图取不到字节时(跨域、类型不对、超过 512 KiB)两者都是空串,这条语境就只剩
+`source` 那段文字 —— 与只送替代文本时的行为一致。两者**同给同空**,只有 `image`
+能带,长度上限 `CONTEXT_LIMITS.imageData`(699052 字符 ≈ 512 KiB 原图)。
+
+带图像的语境渲染成一段文字块 + 若干 image 内容块,附在同一条用户消息上;文字块里
+那一行「图像: 本消息附带的第 N 张图」说的就是先后顺序。`npm run image-check` 用
+一个假的模型 API 真跑一轮,断言模型收到的请求里确实有那条 base64。
 
 - 最多 `CONTEXT_MAX_ITEMS`(4)条,每字段长度上限见 `src/context.ts` 的 `CONTEXT_LIMITS`;
   渲染成一段文本块压在问题之前(`src/context.ts` 的 `renderContext`),模型据此知道
   这段话出自哪一页,要看全文再用 `read_wiki_page` 读语境里给出的那个链接。
+  四条满格的位图 ≈ 2.8 MB,所以 `BODY_LIMIT_BYTES` 的默认值是 4 MiB。
 - **`visibility` 只接受 `public` / `private`**。三态里的「仅本机」只存在浏览器里,送进
   对话等于把它发到本服务并进入模型上下文 —— 带 `local` 的请求在这里就被 400 拒掉,
-  前端也根本不会产出这种语境,两道闸各自独立。
+  前端也根本不会产出这种语境,两道闸各自独立。带图像的位图走的是同一条判断,
+  `local` 一样进不来。
 - 不带 `context` 的请求(老客户端、脚本调用)行为与加这个字段之前完全相同:空数组是
   缺省值,渲染结果为空串,prompt 逐字回到原样。反过来,认识 `chart` 这个 `kind` 需要
   配套的服务端版本:**旧版服务端会以 400 拒掉带 `kind: "chart"` 的请求**(它的 kind

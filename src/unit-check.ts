@@ -7,7 +7,7 @@
  */
 import { WikiIndex, tokenize, normalizeText, filterQueryTokens } from './search.ts';
 import type { ContextItem } from './context.ts';
-import { renderContext, contextItemProblem } from './context.ts';
+import { RASTER_MEDIA_TYPES, contextImages, renderContext, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
@@ -254,6 +254,8 @@ await index.load();
     color: '',
     chart: '',
     source: '',
+    mediaType: '',
+    imageData: '',
     visibility: 'public',
   };
   const annotation: ContextItem = {
@@ -267,6 +269,8 @@ await index.load();
     color: 'blue',
     chart: '',
     source: '',
+    mediaType: '',
+    imageData: '',
     visibility: 'private',
   };
   const chart: ContextItem = {
@@ -280,6 +284,8 @@ await index.load();
     color: '',
     chart: 'mermaid',
     source: 'flowchart TB\n    source["源文档"] --> chunk["切块"]',
+    mediaType: '',
+    imageData: '',
     visibility: 'public',
   };
 
@@ -324,6 +330,30 @@ await index.load();
   check('语境: 位图标出说明', image.includes('图类型: 位图') && image.includes('说明: 页面上的第 1 张图'));
   check('语境: 位图那行说明看不到图像内容', image.includes('看不到图像内容'));
 
+  /* 带图像内容的位图:类型行要说图像在,并且指明是哪一张 —— 一条消息里可以有几张
+     图,不说清谁是谁,模型只能猜。 */
+  const bitmap: ContextItem = {
+    ...chart,
+    chart: 'image',
+    source: '页面上的第 1 张图(位图, 作者没有写替代文本)。',
+    mediaType: 'image/png',
+    imageData: 'iVBORw0KGgo=',
+  };
+  const withImage = renderContext([bitmap], 'https://aipm.ac');
+  check('语境: 带图像的位图说图像随本消息送过来', withImage.includes('位图(图像本身随本消息一起送过来)'), withImage.split('\n').find((l) => l.startsWith('图类型')) ?? '');
+  check('语境: 带图像的位图指明是第几张', withImage.includes('图像: 本消息附带的第 1 张图'));
+  check('语境: 说明那行仍然留着替代文本', withImage.includes('说明: 页面上的第 1 张图'));
+
+  /* 两张图时编号要跟着数:文字块说「第 2 张」,而 contextImages 给出的第二张正是它。 */
+  const second: ContextItem = { ...bitmap, imageData: 'AAAA' };
+  const pair = [selection, bitmap, second];
+  const twoImages = renderContext(pair, 'https://aipm.ac');
+  check('语境: 图像编号按出现顺序递增', twoImages.includes('图像: 本消息附带的第 1 张图') && twoImages.includes('图像: 本消息附带的第 2 张图'));
+
+  const picked = contextImages(pair);
+  check('语境: 只有带图像的位图进图像块', picked.length === 2 && picked[0]!.mediaType === 'image/png' && picked[0]!.data === 'iVBORw0KGgo=' && picked[1]!.data === 'AAAA', JSON.stringify(picked.map((p) => p.mediaType)));
+  check('语境: 没有图像时图像块为空', contextImages([selection, chart]).length === 0);
+
   const multi = renderContext([selection, chart], 'https://aipm.ac');
   check('语境: 图表与别的条目一起编号递增', multi.includes('[语境 2 · 用户正在读的一张图]'));
 
@@ -356,6 +386,25 @@ await index.load();
   check('语境校验: 认不出的图表种类 → 拒收', contextItemProblem(unknownChart) !== null, String(contextItemProblem(unknownChart)));
   const emptySource = { ...chart, source: '   ' };
   check('语境校验: 图表内容为空 → 拒收', contextItemProblem(emptySource) !== null, String(contextItemProblem(emptySource)));
+
+  /* 位图那份图像:类型与内容同给同空、类型限于那四种、只有 image 能带。给全了才是
+     「图像本身也送过来了」,否则模型手里只有一段替代文本。 */
+  check('语境校验: 位图带类型与图像 → 收下', contextItemProblem(bitmap) === null, String(contextItemProblem(bitmap)));
+  check('语境校验: 位图两个字都空(取不到图像)→ 收下', contextItemProblem({ ...bitmap, mediaType: '', imageData: '' }) === null);
+  check(`语境校验: 认得四种位图格式`, RASTER_MEDIA_TYPES.length === 4 && RASTER_MEDIA_TYPES.includes('image/webp'));
+
+  const typeOnly = { ...bitmap, imageData: '' };
+  check('语境校验: 位图只给类型不给图像 → 拒收', contextItemProblem(typeOnly) !== null, String(contextItemProblem(typeOnly)));
+  const dataOnly = { ...bitmap, mediaType: '' } as unknown as ContextItem;
+  check('语境校验: 位图只给图像不给类型 → 拒收', contextItemProblem(dataOnly) !== null, String(contextItemProblem(dataOnly)));
+
+  const badType = { ...bitmap, mediaType: 'image/tiff' } as unknown as ContextItem;
+  check('语境校验: 位图类型不在那四种里 → 拒收', contextItemProblem(badType) !== null, String(contextItemProblem(badType)));
+
+  const mermaidWithImage = { ...chart, mediaType: 'image/png', imageData: 'AAAA' } as unknown as ContextItem;
+  check('语境校验: Mermaid 图带图像 → 拒收', contextItemProblem(mermaidWithImage) !== null, String(contextItemProblem(mermaidWithImage)));
+  const svgWithImage = { ...chart, chart: 'svg', mediaType: 'image/png', imageData: 'AAAA' } as unknown as ContextItem;
+  check('语境校验: SVG 图带图像 → 拒收', contextItemProblem(svgWithImage) !== null, String(contextItemProblem(svgWithImage)));
 }
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);
