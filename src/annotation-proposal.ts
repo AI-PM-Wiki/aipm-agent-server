@@ -7,9 +7,8 @@
  * 只写 localStorage,一个字节都不出本机)。于是服务端那套归属、可见性与权限判断
  * 原样生效,模型输出能到达的最远处正好是「用户点一下鼠标」能到达的地方。
  *
- * 页面**不在**工具的参数里:它由请求的语境定(proposalPage),模型改不了。模型因此
- * 只能对用户此刻正在读的这一页提建议 —— 批注锚的是正文里的一段文字,而模型手里
- * 只有用户送来的那一页。
+ * 页面由客户端在每轮请求中提供，服务端按站内索引核对；显式语境须与页面一致。
+ * 工具参数不含页面，模型无法修改建议的目标。
  *
  * 可见范围缺省 `local`:三态里只有它不出网。模型要提公开或私有的建议,得自己写明,
  * 而用户在卡片上还能改 —— 出不出本机这一档由用户点下去的那一刻定。
@@ -18,6 +17,8 @@
  * `node src/unit-check.ts` 不需要 npm 包就能直接跑断言。工具入参的 zod schema
  * 在 tools.ts,取值与上限都取自这里的常量。
  */
+
+import type { WikiIndex } from "./search.ts";
 
 /** 一轮回话里最多提几条。超出的部分由工具回一句错误让模型收敛,不静默丢掉。 */
 export const PROPOSAL_MAX_ITEMS = 4;
@@ -53,7 +54,7 @@ export const PROPOSAL_LIMITS = {
 export interface AnnotationProposal {
   /** 这一轮里的序号,`p1` 起。卡片按它认人,重复采纳同一条不会写两遍。 */
   id: string;
-  /** 站内路径,由请求的语境定。 */
+  /** 本轮已核对的站内页面路径。 */
   page: string;
   scope: ProposalScope;
   /** 逐字引文(exact)。`text` 粒度必须有,`page` 粒度必须空。 */
@@ -78,12 +79,7 @@ export function normalizePage(path: string): string {
 }
 
 /**
- * 这一轮可以往哪一页写。取语境里第一条的页面 —— 语境条在换页时就地清空
- * (前端的 pruneCtxForPage),所以这几条说的是同一页;真出现不一致时按第一条算,
- * 拿不准不放大。
- *
- * 一条语境都没有时返回 null:`propose_annotation` 据此直接拒绝。模型手里没有
- * 「用户此刻在读哪一页」这条信息,就不该凭空写下一段谁也锚不上的引文。
+ * 内部调用沿用显式语境；HTTP 请求由 resolveRequestPage 校验页面。
  */
 export function proposalPage(
   items: readonly { page: string }[],
@@ -93,6 +89,28 @@ export function proposalPage(
     if (page.length > 0) return page;
   }
   return null;
+}
+
+/** undefined 表示页面无效；null 表示请求没有页面或语境。 */
+export function resolveRequestPage(
+  page: string | undefined,
+  items: readonly { page: string }[],
+  index: WikiIndex,
+  siteBase: string,
+): string | null | undefined {
+  const target = page ?? items[0]?.page;
+  if (target === undefined) return null;
+  if (
+    target.length > 512 || !target.startsWith("/") ||
+    !target.endsWith("/") || target.includes("//") ||
+    target.includes("\\") || target.includes("?") || target.includes("#") ||
+    new URL(target, siteBase).pathname !== target ||
+    items.some((item) => item.page !== target)
+  ) return undefined;
+
+  const resolved = index.resolvePage(target);
+  if (resolved === null || new URL(resolved.url).pathname !== target) return undefined;
+  return target;
 }
 
 /**

@@ -12,6 +12,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
+import { resolveRequestPage } from "./annotation-proposal.ts";
 import { loadConfig } from './config.ts';
 import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
@@ -77,6 +78,7 @@ export const ChatBodySchema = z.object({
     .default([]),
   /* 缺省为空数组:老客户端不带这个字段,拿到的行为与加它之前完全一致。 */
   context: z.array(ContextItemSchema).max(CONTEXT_MAX_ITEMS).default([]),
+  page: z.string().max(512).optional(),
 });
 
 interface ServerDeps {
@@ -366,6 +368,13 @@ export function createApp(deps: ServerDeps) {
         return;
       }
 
+      const proposalPage = resolveRequestPage(parsed.page, parsed.context, index, config.siteBase);
+      if (proposalPage === undefined) {
+        budget.release(estimate);
+        sendError(req, res, 400, "bad_request", "当前页面无效、未收录或与语境页面不一致", corsHeaders);
+        return;
+      }
+
       const history = truncateHistory(parsed.history);
 
       // —— 进入 SSE 流 ——
@@ -404,6 +413,7 @@ export function createApp(deps: ServerDeps) {
           message: parsed.message,
           history,
           context: parsed.context,
+          proposalPage,
           config,
           index,
           signal: abortController.signal,

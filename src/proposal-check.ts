@@ -17,7 +17,7 @@
  *  - 回给模型的结果明说「还没有写入」;
  *  - 模型自己塞 page / author:id 之类的键 → 当场是错误结果,没有建议成型;
  *  - 可见范围、粒度、引文那几条规则:不合规的不成型;
- *  - 没有语境(不知道用户在读哪一页)→ 直接拒绝;
+ *  - 请求缺少页面及语境时拒绝建议;
  *  - 一轮超过上限:超出的部分回错误,不静默丢掉。
  */
 import { createServer } from 'node:http';
@@ -31,6 +31,8 @@ import { runAgent } from './agent.ts';
 import type { ContextItem } from './context.ts';
 import { PROPOSAL_MAX_ITEMS } from './annotation-proposal.ts';
 import type { AnnotationProposal } from './annotation-proposal.ts';
+
+import type { ChatTurn } from "./history.ts";
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -217,7 +219,9 @@ interface RunResult {
 }
 
 /** 跑一轮:给定的脚本 + 语境,回收建议、模型收到的请求体与回答文本。 */
-async function run(scriptTurns: Turn[], context: ContextItem[]): Promise<RunResult> {
+async function run(
+  scriptTurns: Turn[], context: ContextItem[], page?: string | null, history: ChatTurn[] = [],
+): Promise<RunResult> {
   script = scriptTurns;
   toolTurns = 0;
   captured.length = 0;
@@ -225,8 +229,9 @@ async function run(scriptTurns: Turn[], context: ContextItem[]): Promise<RunResu
   const answer: string[] = [];
   await runAgent({
     message: '把这段里讲 RAG 的地方标一下',
-    history: [],
+    history,
     context,
+    proposalPage: page,
     config,
     index,
     callbacks: {
@@ -277,7 +282,7 @@ function toolResults(calls: Record<string, unknown>[]): { is_error: boolean; tex
 }
 
 /* ================================================================
-   一、合规的一条:回调收到它,页面来自语境
+   一、合规的一条:回调收到它,目标由请求页面确定
    ================================================================ */
 const happy = await run(
   [
@@ -325,7 +330,7 @@ check('合规的一条:结果不是错误', results[0]?.is_error === false);
 /* ================================================================
    二、越权:模型自己塞页面与作者
    ----------------------------------------------------------------
-   工具的参数里没有 page,也没有任何作者字段 —— 前者的目标页面由服务端从语境定,
+   工具的参数里没有 page,也没有任何作者字段 —— 目标页面由服务端根据请求确定,
    后者的归属由批注服务按令牌定,两处都不经过模型的手。模型硬塞这两个键时,
    参数在 schema 那一层就被丢掉了(到不了处理器),建议照常成型,目标页面仍是语境
    里那一页。所以这里量的**不是**一条错误消息,而是不变式:它点名的页面没有
@@ -402,7 +407,7 @@ check(
 );
 
 /* ================================================================
-   四、没有语境:不知道用户在读哪一页 —— 直接拒绝
+   四、没有页面及语境时拒绝建议
    ================================================================ */
 const noContext = await run(
   [
@@ -423,6 +428,29 @@ check(
 /* ================================================================
    五、一轮提超上限:多出来的回错误,不静默丢掉
    ================================================================ */
+const currentPage = await run(
+  [
+    { tools: [{ name: TOOL, input: { scope: "page", body: "建议为当前文章增加案例" } }] },
+    { text: "请确认这条评论建议。" },
+  ],
+  [],
+  "/ai/rag/",
+);
+check("当前页无附加语境时生成整页建议", currentPage.proposals[0]?.page === "/ai/rag/" && currentPage.proposals[0]?.scope === "page");
+check("当前页地址进入模型输入", JSON.stringify(currentPage.calls[0]).includes("https://aipm.ac/ai/rag/"));
+
+const changedPage = await run(
+  [
+    { tools: [{ name: TOOL, input: { scope: "page", body: "这篇文章可补充实践要点", page: "/ai/rag/" } }] },
+    { text: "请确认。" },
+  ],
+  [],
+  "/ai/prompting/",
+  [{ role: "user", content: "原先阅读的页面是 /ai/rag/" }],
+);
+check("换页后模型参数不能覆盖目标", changedPage.proposals[0]?.page === "/ai/prompting/");
+check("历史记录不能覆盖当前页面", JSON.stringify(changedPage.calls[0]).includes("原先阅读的页面是 /ai/rag/"));
+
 const many: ToolCall[] = [];
 for (let i = 0; i < PROPOSAL_MAX_ITEMS + 1; i++) {
   many.push({

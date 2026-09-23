@@ -165,7 +165,10 @@ function reasonOf(body: unknown): string | null {
 
 // ---- HTTP:同一组坏请求停在 400 ----
 const config = loadConfig({ ANTHROPIC_API_KEY: 'context-check-only' });
-const index = WikiIndex.fromDocs([], config.siteBase);
+const index = WikiIndex.fromDocs([
+  { location: "ai/rag/", title: "RAG", text: "检索增强生成" },
+  { location: "ai/prompting/", title: "提示词", text: "提示词工程" },
+], config.siteBase);
 const { server } = createApp({ config, index });
 await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
 const port = (server.address() as AddressInfo).port;
@@ -198,6 +201,14 @@ const rejected: Array<[string, unknown]> = [
   ['不认识的 kind', chatBody([{ ...selection, kind: 'comment' }])],
   ['请求体不是 JSON', '{'],
 ];
+
+rejected.push(
+  ["未收录的当前页", { message: "给建议", page: "/missing/" }],
+  ["非法跨站页面", { message: "给建议", page: "//evil.example/" }],
+  ["空页面", { message: "给建议", page: "" }],
+  ["换页后旧选区", { message: "给建议", page: "/ai/prompting/", context: [selection] }],
+  ["旧客户端携带无效选区页面", { message: "给建议", context: [{ ...selection, page: "/missing/" }] }],
+);
 
 for (const [name, payload] of rejected) {
   const res = await post(payload);

@@ -34,15 +34,14 @@ export interface McpServerDeps {
   index: WikiIndex;
   /** search_wiki 每次返回后回调(服务端拦截工具结果 → SSE sources 事件) */
   onSources?: (evt: SourcesEvent) => void;
-  /** 这一轮建议只能写给哪一页。由请求的语境定,模型改不了;为空时
-      propose_annotation 直接拒绝(见 annotation-proposal.ts 的 proposalPage)。 */
+  /** 本轮建议的目标来自已核对的请求页面，模型无法修改；缺少页面时拒绝建议。 */
   proposalPage: string | null;
   /** propose_annotation 每次成型一条后回调(服务端拦截 → SSE proposal 事件)。 */
   onProposal?: (proposal: AnnotationProposal) => void;
 }
 
 /**
- * propose_annotation 的入参。**没有 page** —— 页面由服务端从语境里取,模型的
+ * propose_annotation 的入参。**没有 page** —— 页面由服务端核对请求得到,模型的
  * 参数里根本没有这一项;strict 让多写的键(模型自己塞一个 page、author、id 之类)
  * 当场变成一个错误结果,而不是被静默忽略。
  */
@@ -172,7 +171,7 @@ export function createWikiMcpServer(deps: McpServerDeps): McpServerConfig {
           note: z.string().max(PROPOSAL_LIMITS.note).default('').describe('给用户看的一句理由(可选)'),
         },
         async (args) => {
-          /* 页面由请求的语境定,不经过模型的手。没有语境就没有可锚定的页面。 */
+          /* 页面来自客户端请求，服务端已核对站内索引与显式语境。 */
           if (proposalPage === null) {
             return textResult(
               '这一轮没有可锚定的页面:用户没带任何语境(划选的一段原文、一条批注或一张图)。' +

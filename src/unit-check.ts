@@ -13,6 +13,8 @@ import { SlidingWindowLimiter, Semaphore, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, writeSseEvent, startHeartbeat } from './sse.ts';
 
+import { resolveRequestPage } from "./annotation-proposal.ts";
+
 // ---- SSE 帧写入(用 stub ServerResponse) ----
 {
   const chunks: Buffer[] = [];
@@ -134,6 +136,26 @@ await index.load();
     halluc.some((h) => h.location.includes('幻觉护栏') || h.location.includes('lessons')),
     halluc[0]?.title,
   );
+}
+
+// ---- 当前文章目标 ----
+{
+  const pages = WikiIndex.fromDocs([
+    { location: "ai/rag/", title: "RAG", text: "检索增强生成的介绍" },
+    { location: "ai/prompting/#intro", title: "提示词", text: "提示词正文" },
+  ]);
+  const valid = (page: string | undefined, items: { page: string }[] = []) =>
+    resolveRequestPage(page, items, pages, "https://aipm.ac/");
+  check("当前页无语境可提出建议", valid("/ai/rag/") === "/ai/rag/");
+  check("显式选区与当前页一致", valid("/ai/rag/", [{ page: "/ai/rag/" }]) === "/ai/rag/");
+  check("旧客户端沿用显式语境", valid(undefined, [{ page: "/ai/rag/" }]) === "/ai/rag/");
+  check("旧客户端缺少页面时不开放目标", valid(undefined) === null);
+  check("换页后的旧语境无法覆盖当前页", valid("/ai/prompting/", [{ page: "/ai/rag/" }]) === undefined);
+  check("同轮不同页面语境被拒", valid(undefined, [{ page: "/ai/rag/" }, { page: "/ai/prompting/" }]) === undefined);
+  check("分节索引支持整页", valid("/ai/prompting/") === "/ai/prompting/");
+  for (const path of ["", "/missing/", "https://evil.example/", "//evil.example/", "/ai/rag/?x=1", "/ai/../rag/", "/ai/%2e%2e/rag/", "/ai/rag/#intro", "/ai/rag\\/"]) {
+    check(`无效页面被拒: ${path}`, valid(path) === undefined);
+  }
 }
 
 // ---- resolvePage ----

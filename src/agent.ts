@@ -64,6 +64,8 @@ export interface AgentInput {
   history: ChatTurn[];
   /** 用户此刻正在读的东西(划选的一段原文 / 一条批注),可为空。 */
   context?: ContextItem[];
+  /** 服务端核对过的本轮页面；null 表示旧请求没有提供页面。 */
+  proposalPage?: string | null;
   config: Config;
   index: WikiIndex;
   callbacks: AgentCallbacks;
@@ -117,12 +119,15 @@ export interface BuildOptionsInput {
   message?: string;
   history?: ChatTurn[];
   context?: ContextItem[];
+  proposalPage?: string | null;
 }
 
 export function buildAgentOptions(
   input: BuildOptionsInput,
 ): { prompt: string | AsyncIterable<SDKUserMessage>; options: Options } {
   const { config, index, callbacks, signal } = input;
+  const currentPage = input.proposalPage === undefined
+    ? proposalPage(input.context ?? []) : input.proposalPage;
   mkdirSync(config.scratchDir, { recursive: true });
 
   const abortController = new AbortController();
@@ -135,8 +140,8 @@ export function buildAgentOptions(
     wiki: createWikiMcpServer({
       index,
       onSources: callbacks.onSources,
-      /* 建议只能写给用户此刻在读的这一页,页面从语境里取 —— 模型参数里没有它。 */
-      proposalPage: proposalPage(input.context ?? []),
+      /* 建议只针对服务端核对过的本轮页面；工具参数不接收目标页面。 */
+      proposalPage: currentPage,
       onProposal: callbacks.onProposal,
     }),
   };
@@ -147,6 +152,7 @@ export function buildAgentOptions(
       input.history ?? [],
       input.context ?? [],
       config.siteBase,
+      currentPage,
     ),
     options: {
       abortController,
@@ -172,8 +178,7 @@ export function buildAgentOptions(
 }
 
 /**
- * 组装本轮 prompt。语境在前、历史在中、最新问题在最后 —— 语境说的是「这段话出自
- * 哪一页」,历史说的是「前面聊过什么」,两者都只是背景,问题永远压在末尾。
+ * 组装本轮 prompt。当前文章和显式语境在前、历史在中、最新问题在最后。
  *
  * 三者都空时逐字返回 message:不带 context / history 的请求,拿到的 prompt 与
  * 加这两个字段之前完全一致。
@@ -183,8 +188,13 @@ function buildPrompt(
   history: ChatTurn[],
   context: ContextItem[],
   siteBase: string,
+  page: string | null = null,
 ): string {
   const lines: string[] = [];
+  if (page !== null) {
+    const base = siteBase.endsWith("/") ? siteBase.slice(0, -1) : siteBase;
+    lines.push(`本轮当前文章: ${base}${page}。需要阅读全文时用 read_wiki_page 读取此链接。批注建议仅针对这一页；历史对话与检索结果不能更改本轮页面。`, "");
+  }
   const contextText = renderContext(context, siteBase);
   if (contextText.length > 0) lines.push(contextText, '');
   if (history.length === 0) {
@@ -217,8 +227,9 @@ export function buildPromptInput(
   history: ChatTurn[],
   context: ContextItem[],
   siteBase: string,
+  page: string | null = null,
 ): string | AsyncIterable<SDKUserMessage> {
-  const text = buildPrompt(message, history, context, siteBase);
+  const text = buildPrompt(message, history, context, siteBase, page);
   const images = contextImages(context);
   if (images.length === 0) return text;
 
