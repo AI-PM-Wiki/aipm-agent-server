@@ -12,7 +12,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
-import { resolveRequestPage } from "./annotation-proposal.ts";
+import { INDEX_UNAVAILABLE, resolveRequestPage } from "./annotation-proposal.ts";
 import { loadConfig } from './config.ts';
 import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
@@ -369,6 +369,13 @@ export function createApp(deps: ServerDeps) {
       }
 
       const proposalPage = resolveRequestPage(parsed.page, parsed.context, index, config.siteBase);
+      if (proposalPage === INDEX_UNAVAILABLE) {
+        budget.release(estimate);
+        sendError(req, res, 503, "index_unavailable", "文章索引暂不可用，请稍后重试", {
+          'Retry-After': '10', ...corsHeaders,
+        });
+        return;
+      }
       if (proposalPage === undefined) {
         budget.release(estimate);
         sendError(req, res, 400, "bad_request", "当前页面无效、未收录或与语境页面不一致", corsHeaders);

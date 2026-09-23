@@ -13,7 +13,7 @@ import { SlidingWindowLimiter, Semaphore, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, writeSseEvent, startHeartbeat } from './sse.ts';
 
-import { resolveRequestPage } from "./annotation-proposal.ts";
+import { INDEX_UNAVAILABLE, resolveRequestPage } from "./annotation-proposal.ts";
 
 // ---- SSE 帧写入(用 stub ServerResponse) ----
 {
@@ -153,6 +153,10 @@ await index.load();
   check("换页后的旧语境无法覆盖当前页", valid("/ai/prompting/", [{ page: "/ai/rag/" }]) === undefined);
   check("同轮不同页面语境被拒", valid(undefined, [{ page: "/ai/rag/" }, { page: "/ai/prompting/" }]) === undefined);
   check("分节索引支持整页", valid("/ai/prompting/") === "/ai/prompting/");
+  const empty = WikiIndex.fromDocs([]);
+  check("空索引不接纳合法目标", resolveRequestPage("/ai/rag/", [], empty, "https://aipm.ac/") === INDEX_UNAVAILABLE);
+  check("空索引仍拒绝非法路径", resolveRequestPage("//evil.example/", [], empty, "https://aipm.ac/") === undefined);
+  check("空索引仍拒绝语境不一致", resolveRequestPage("/ai/rag/", [{ page: "/ai/prompting/" }], empty, "https://aipm.ac/") === undefined);
   for (const path of ["", "/missing/", "https://evil.example/", "//evil.example/", "/ai/rag/?x=1", "/ai/../rag/", "/ai/%2e%2e/rag/", "/ai/rag/#intro", "/ai/rag\\/"]) {
     check(`无效页面被拒: ${path}`, valid(path) === undefined);
   }

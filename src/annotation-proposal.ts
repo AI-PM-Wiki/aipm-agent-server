@@ -91,13 +91,15 @@ export function proposalPage(
   return null;
 }
 
+export const INDEX_UNAVAILABLE = Symbol('index_unavailable');
+
 /** undefined 表示页面无效；null 表示请求没有页面或语境。 */
 export function resolveRequestPage(
   page: string | undefined,
   items: readonly { page: string }[],
   index: WikiIndex,
   siteBase: string,
-): string | null | undefined {
+): string | null | undefined | typeof INDEX_UNAVAILABLE {
   const target = page ?? items[0]?.page;
   if (target === undefined) return null;
   if (
@@ -108,6 +110,7 @@ export function resolveRequestPage(
     items.some((item) => item.page !== target)
   ) return undefined;
 
+  if (index.getStats().docCount === 0) return INDEX_UNAVAILABLE;
   const resolved = index.resolvePage(target);
   if (resolved === null || new URL(resolved.url).pathname !== target) return undefined;
   return target;
