@@ -1,6 +1,6 @@
 /**
  * HTTP 服务(node:http,无框架):
- *  - POST /api/chat  SSE 事件流(ready/sources/delta/done/error + 15s 心跳)
+ *  - POST /api/chat  SSE 事件流(ready/sources/proposal/delta/done/error + 15s 心跳)
  *  - GET  /healthz   索引状态
  *  - OPTIONS         预检
  * 预校验失败返回纯 JSON:400 / 401(API Key)/ 403(Origin)/ 413(体积)/
@@ -385,6 +385,7 @@ export function createApp(deps: ServerDeps) {
       let answerChars = 0;
       let thinkingChars = 0;
       let sourcesCount = 0;
+      let proposalsCount = 0;
       const log = (extra: Record<string, unknown>) =>
         console.log(
           JSON.stringify({ ts: new Date().toISOString(), requestId, ...extra }),
@@ -426,6 +427,13 @@ export function createApp(deps: ServerDeps) {
               });
             },
             onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
+            /* 一条待确认的批注建议。这一帧只是把它摆到用户面前 —— 写入由页面在
+               用户点采纳之后、用他自己的会话完成,本服务不持有任何批注凭据。 */
+            onProposal: (proposal) => {
+              proposalsCount++;
+              safeWrite('proposal', proposal);
+              log({ event: 'proposal', id: proposal.id, page: proposal.page, scope: proposal.scope, visibility: proposal.visibility });
+            },
           },
         });
       } finally {
@@ -460,7 +468,7 @@ export function createApp(deps: ServerDeps) {
             durationMs: outcome.durationMs,
             numTurns: outcome.numTurns,
           });
-          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, contextCount: parsed.context.length, dailyLeftUsd: budget.remainingUsd });
+          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, proposalsCount, contextCount: parsed.context.length, dailyLeftUsd: budget.remainingUsd });
         } else if (timedOut) {
           // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
           safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });
