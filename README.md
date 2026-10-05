@@ -66,7 +66,9 @@ npm install          # 装依赖(含 SDK 自带 CLI 原生二进制)
 npm run build        # tsc → dist/
 npm start            # 起服务,监听 HOST:PORT(默认 127.0.0.1:8787)
 npm run smoke        # 检索冒烟:BM25 top-5 目检(零依赖,也可 node src/smoke-search.ts)
-npm run unit-check   # 无依赖单元检查(分词/BM25/定位/限流等,需网络访问线上索引)
+npm run unit-check   # 无依赖单元检查(分词/BM25/定位/语境渲染与校验/限流等,需网络访问线上索引)
+npm run context-check   # /api/chat 的语境校验自检(要 npm 依赖,不联网):schema 断言 + 真发 HTTP 断言坏请求停在 400
+npm run image-check     # 位图语境的动态回归(要 npm 依赖,不联网):假模型 API + 真跑一轮,断言模型请求里有 image 内容块
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
 ```
@@ -77,16 +79,88 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 
 | event | data | 时机 |
 |---|---|---|
-| `ready` | `{requestId}` | 流打开 |
+| `ready` | `{requestId, contextCount}` | 流打开 |
 | `sources` | `{query, results:[{title,url,snippet}]}` | 每次 search_wiki 返回 |
 | `delta` | `{text}` 增量 | 回答 token 块 |
 | `done` | `{usage, costUsd, durationMs, numTurns}` | 终帧后关闭 |
-| `error` | `{code: budget_exceeded\|max_turns\|model_error\|internal, message}` | 随后关闭 |
+| `error` | `{code: budget_exceeded\|max_turns\|model_error\|image_unsupported\|internal, message}` | 随后关闭 |
+
+### 语境(`context`)
+
+请求体可以是 `{message, history?, context?}`。`context` 是「用户此刻正在读的东西」——
+正文里划选的一段原文、批注面板里的一条批注,或正文里的一张图,由前端随提问带上
+(见主仓库 `docs/_static/js/context-item.js`、`chart-context.js` 与 AIPM#107):
+
+```json
+{
+  "kind": "selection",
+  "page": "/ai/rag/",
+  "title": "检索增强生成",
+  "quote": "被划的那段原文",
+  "prefix": "上文…", "suffix": "…下文",
+  "body": "", "color": "", "chart": "", "source": "",
+  "mediaType": "", "imageData": "", "visibility": "public"
+}
+```
+
+按 `kind` 分三支,`chart` 与 `source` 只有图表用得上:
+
+| `kind` | 必填 | 说明 |
+|---|---|---|
+| `selection` | `quote` | 正文里划的一段原文 |
+| `annotation` | `quote` 或 `body` 至少一段 | 批注面板里的一条批注;全页评论只有 `body` |
+| `chart` | `chart`(取值 `mermaid` / `svg` / `image`)与 `source` | 正文里的一张图 |
+
+`source` 是**前端取好的文字**,不是图的地址:mermaid 是它的源码,SVG 是图里写的字,
+位图是作者写的替代文本。取不到时前端写一句说明(第几张、什么图、为什么没有),
+而不是送一条空语境 —— 所以服务端这边看到空 `source` 直接拒收。
+
+`mediaType` 与 `imageData` 只有 `chart: "image"` 用得上,是**图像本身**:base64 的
+原始字节与它的媒体类型(`image/png` / `image/jpeg` / `image/webp` / `image/gif`)。
+位图取不到字节时(跨域、类型不对、超过 512 KiB)两者都是空串,这条语境就只剩
+`source` 那段文字 —— 与只送替代文本时的行为一致。两者**同给同空**,只有 `image`
+能带,长度上限 `CONTEXT_LIMITS.imageData`(699052 字符 ≈ 512 KiB 原图)。
+
+带图像的语境渲染成一段文字块 + 若干 image 内容块,附在同一条用户消息上;文字块里
+那一行「图像: 本消息附带的第 N 张图」说的就是先后顺序。`npm run image-check` 用
+一个假的模型 API 真跑一轮,断言模型收到的请求里确实有那条 base64。
+
+- 最多 `CONTEXT_MAX_ITEMS`(4)条,每字段长度上限见 `src/context.ts` 的 `CONTEXT_LIMITS`;
+  渲染成一段文本块压在问题之前(`src/context.ts` 的 `renderContext`),模型据此知道
+  这段话出自哪一页,要看全文再用 `read_wiki_page` 读语境里给出的那个链接。
+  四条满格的位图 ≈ 2.8 MB,所以 `BODY_LIMIT_BYTES` 的默认值是 4 MiB。
+- **`visibility` 只接受 `public` / `private`**。三态里的「仅本机」只存在浏览器里,送进
+  对话等于把它发到本服务并进入模型上下文 —— 带 `local` 的请求在这里就被 400 拒掉,
+  前端也根本不会产出这种语境,两道闸各自独立。带图像的位图走的是同一条判断,
+  `local` 一样进不来。
+- 不带 `context` 的请求(老客户端、脚本调用)行为与加这个字段之前完全相同:空数组是
+  缺省值,渲染结果为空串,prompt 逐字回到原样。反过来,认识 `chart` 这个 `kind` 需要
+  配套的服务端版本:**旧版服务端会以 400 拒掉带 `kind: "chart"` 的请求**(它的 kind
+  枚举里没有这一项),不像多余的字段那样被丢弃。两仓库的 gitlink 因此要一起走。
 
 预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
 `code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内
-`error` 帧只有上表 4 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
+`error` 帧只有上表 5 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
 客户端断连即 abort,停止计费。
+
+### 模型不收图时的那一帧(`image_unsupported`)
+
+模型不收图像时,上游的 400 **不会**走到这里:CLI 自己接住它,把消息里的图像块换成
+一段说明文字、重发一次,于是这一轮**成功**结束 —— 而回答根本没看过那张图。用户在
+界面上看不到任何提示,以为模型看过图了。
+
+整条消息流里唯一能看出这件事的,是 CLI 为此发的那条合成 assistant 消息(模型名
+`<synthetic>`,带 `error: invalid_request`,正文说图没能处理、已被摘掉)。
+`src/agent.ts` 的 `isImageRemovalNotice` 认的就是它:这一轮确实带了图、错误类别是
+`invalid_request`、正文说的是图被摘掉 —— 三个条件同时成立才算。认出之后这一轮就
+地中止,返回 `image_unsupported`,于是:
+
+- 前端按 code 取一句能照着做的文案(「去掉对话框上方的图片语境后再问一次」),
+  界面上不出现任何上游报错原文与请求编号;
+- 那段「假装看过图」的回答不会被发出去 —— 中止发生在它开始生成之前。
+
+三个条件里少任何一个都不动手:把别的 400 说成「模型不收图」会把用户引到一条走不通
+的路上,而漏认的后果只是回到原本那种「悄悄没看图」。
 
 ## 部署注意
 

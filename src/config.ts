@@ -63,7 +63,11 @@ const EnvSchema = z.object({
   // 每日预算护栏(USD,按 SDK total_cost_usd 累计,UTC 日切,进程内状态):
   // 0 = 关闭;默认 1.4 ≈ ¥10/天(以实际账单为准可调)。
   DAILY_BUDGET_USD: z.coerce.number().min(0).default(1.4),
-  BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(65_536),
+  // 请求体字节上限。位置图语境而来:一条位图最多 CONTEXT_LIMITS.imageData(699052)
+  // 个 base64 字符,四条满格的图 ≈ 2.8 MB,再叠上 message(≤10k)与 history(≤12k)。
+  // 4 MiB 刚好容下最坏的一轮,同时仍是读取超时(BODY_TIMEOUT_MS)与并发槽位之下
+  // 的一道硬边界 —— 慢速 POST 拖不满它就先被超时断开。
+  BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(4_194_304),
   // 请求体读取超时(ms):慢速 POST 拖住并发槽位的 DoS 兜底,超时断开并释放槽位。
   BODY_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
   // 单轮问答墙钟上限(ms):到点强制 abort(与客户端断连同一中止路径),防 agent 挂死。
