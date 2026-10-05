@@ -5,12 +5,8 @@
  *
  *   npm run proposal-check
  *
- * 造法:起一个假的模型 API,把 ANTHROPIC_BASE_URL 指到它,然后**真跑一轮**
- * runAgent —— 真 SDK、真 CLI 子进程、真 MCP 工具调用、真 HTTP 请求。假 API 按
- * 脚本回 tool_use,把收到的请求体抄下来。于是断言的对象不是我们自己的中间变量,
- * 而是模型真正收到的那个字节流与工具真正收到的参数。
- *
- * 不联网、不需要 ANTHROPIC_API_KEY(配置里塞的是假 key,索引是空的 WikiIndex)。
+ * 请求由记录代理转发到明确授权的真实模型。工具调用要求放在用户消息中，
+ * 断言核对实际模型请求、工具结果和建议回调。配置缺少时快速失败。
  *
  * 覆盖:
  *  - 一条合规的建议 → 回调收到它,页面是语境的页面(model 参数里没有 page);
@@ -20,9 +16,7 @@
  *  - 请求缺少页面及语境时拒绝建议;
  *  - 一轮超过上限:超出的部分回错误,不静默丢掉。
  */
-import { createServer } from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { realModelRecorder } from './real-model-check.ts';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from './config.ts';
@@ -45,7 +39,8 @@ interface Captured {
   body: Record<string, unknown>;
 }
 
-const captured: Captured[] = [];
+const recorder = await realModelRecorder();
+const captured: Captured[] = recorder.captured;
 
 /** 一次 tool_use 的脚本:工具名与入参,原样发给模型侧。 */
 interface ToolCall {
@@ -53,138 +48,15 @@ interface ToolCall {
   input: Record<string, unknown>;
 }
 
-/** 假 API 这一轮的回复:要么提几个工具调用,要么收尾说一句话。 */
+/** A requested tool scenario and the expected concluding text. */
 type Turn = { tools: ToolCall[] } | { text: string };
-
-/** 按顺序消耗的脚本。用完之后一律回最后一条(收尾那句话)。 */
-let script: Turn[] = [{ text: '收到。' }];
-
-function sseText(text: string): string {
-  return [
-    'event: message_start',
-    'data: {"type":"message_start","message":{"id":"msg_stub","type":"message","role":"assistant","model":"stub","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
-    '',
-    'event: content_block_start',
-    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-    '',
-    'event: content_block_delta',
-    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })}`,
-    '',
-    'event: content_block_stop',
-    'data: {"type":"content_block_stop","index":0}',
-    '',
-    'event: message_delta',
-    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}',
-    '',
-    'event: message_stop',
-    'data: {"type":"message_stop"}',
-    '',
-    '',
-  ].join('\n');
-}
-
-function sseTools(calls: ToolCall[]): string {
-  const out: string[] = [
-    'event: message_start',
-    'data: {"type":"message_start","message":{"id":"msg_stub","type":"message","role":"assistant","model":"stub","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
-    '',
-  ];
-  calls.forEach((call, index) => {
-    out.push(
-      'event: content_block_start',
-      `data: ${JSON.stringify({
-        type: 'content_block_start',
-        index,
-        content_block: { type: 'tool_use', id: `toolu_${index + 1}`, name: call.name, input: {} },
-      })}`,
-      '',
-      'event: content_block_delta',
-      `data: ${JSON.stringify({
-        type: 'content_block_delta',
-        index,
-        delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.input) },
-      })}`,
-      '',
-      'event: content_block_stop',
-      `data: ${JSON.stringify({ type: 'content_block_stop', index })}`,
-      '',
-    );
-  });
-  out.push(
-    'event: message_delta',
-    'data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":2}}',
-    '',
-    'event: message_stop',
-    'data: {"type":"message_stop"}',
-    '',
-    '',
-  );
-  return out.join('\n');
-}
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
-    let raw = '';
-    req.on('data', (chunk: Buffer) => {
-      raw += chunk.toString('utf8');
-    });
-    req.on('end', () => resolve(raw));
-  });
-}
-
-let toolTurns = 0;
-
-const stub = createServer((req: IncomingMessage, res: ServerResponse) => {
-  void (async () => {
-    const path = (req.url ?? '/').split('?')[0]!;
-    const raw = await readBody(req);
-    let body: Record<string, unknown> = {};
-    try {
-      body = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      body = { _unparsed: raw.slice(0, 200) };
-    }
-    captured.push({ path, body });
-    if (path.endsWith('/count_tokens')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ input_tokens: 1 }));
-      return;
-    }
-    /* 脚本只按 /v1/messages 推进:SDK 起手还会问一次 /api/hello,它不该吃掉
-       一轮脚本(第一版就是这里差了一位:第一次模型调用拿到的是收尾那句)。 */
-    if (!path.endsWith('/messages')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('{}');
-      return;
-    }
-    const turn = script[Math.min(toolTurns, script.length - 1)]!;
-    toolTurns += 1;
-    const payload = 'tools' in turn ? sseTools(turn.tools) : sseText(turn.text);
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    res.end(payload);
-  })();
-});
-
-await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', () => resolve()));
-const stubPort = (stub.address() as AddressInfo).port;
-const stubBase = `http://127.0.0.1:${stubPort}`;
-
 const scratch = join(process.cwd(), '..', 'meta', 'proposal-check');
 mkdirSync(scratch, { recursive: true });
 
-/* CLI 子进程继承的是进程环境:把模型地址指到假 API 上,这一轮就不会打到真的
-   那一侧(与 image-model-check.ts 同一路数)。 */
-process.env.ANTHROPIC_BASE_URL = stubBase;
-process.env.ANTHROPIC_API_KEY = 'proposal-check';
-process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-
 const config = loadConfig({
-  ANTHROPIC_API_KEY: 'proposal-check',
-  ANTHROPIC_BASE_URL: stubBase,
-  MODEL: 'claude-opus-5',
+  ANTHROPIC_API_KEY: recorder.apiKey,
+  ANTHROPIC_BASE_URL: recorder.base,
+  MODEL: recorder.model,
   MAX_TURNS: '4',
   MAX_BUDGET_USD: '0.1',
   DAILY_BUDGET_USD: '0',
@@ -218,17 +90,16 @@ interface RunResult {
   answer: string;
 }
 
-/** 跑一轮:给定的脚本 + 语境,回收建议、模型收到的请求体与回答文本。 */
+/** Run an actual model turn and collect proposals, requests, and answer text. */
 async function run(
   scriptTurns: Turn[], context: ContextItem[], page?: string | null, history: ChatTurn[] = [],
 ): Promise<RunResult> {
-  script = scriptTurns;
-  toolTurns = 0;
   captured.length = 0;
   const proposals: AnnotationProposal[] = [];
   const answer: string[] = [];
   await runAgent({
-    message: '把这段里讲 RAG 的地方标一下',
+    message: '把这段里讲 RAG 的地方标一下。请调用以下工具并使用给定参数：' +
+      JSON.stringify(scriptTurns.flatMap(turn => 'tools' in turn ? turn.tools : [])),
     history,
     context,
     proposalPage: page,
@@ -502,7 +373,7 @@ check(
   JSON.stringify(pageComment.proposals[0]),
 );
 
-stub.close();
+recorder.server.close();
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);
 process.exit(failed === 0 ? 0 : 1);

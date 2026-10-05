@@ -7,20 +7,13 @@
  * 这条通路的前半段(文件字节 → 语境条目 → 请求体)由浏览器用例证明;这里是后半段:
  * 请求体里的 base64 有没有变成模型 API 请求里的一条 image 内容块。
  *
- * 造法:起一个假的模型 API,把 ANTHROPIC_BASE_URL 指到它,然后**真跑一轮**
- * runAgent —— 真 SDK、真 CLI 子进程、真 HTTP 请求。假 API 把收到的请求体抄下来,
- * 用它自己那份 SSE 脚本把这一轮结束掉。于是断言的对象不是我们自己的中间变量,
- * 而是模型真正会收到的那个字节流。
- *
- * 不联网、不需要 ANTHROPIC_API_KEY(配置里塞的是假 key,索引是空的 WikiIndex):
- * 请求全打在回环上的假 API。
+ * 记录代理将请求发送给明确授权的真实模型，响应原样转发。
+ * 图像拒收检查使用明确配置的真实模型，缺少配置时快速失败。
  *
  * 反证(去掉 mediaType / imageData 从 buildPromptInput 到内容块的那一步,或让
  * contextImages 返回空数组)时,下面每一条图像断言都会红。
  */
-import { createServer } from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { realModelRecorder } from './real-model-check.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from './config.ts';
@@ -34,57 +27,21 @@ function check(name: string, cond: boolean, detail = ''): void {
   if (!cond) failed++;
 }
 
-/* 一张 1×1 的 PNG。用真图而不是随手编的 base64:假 API 收到什么,这里就比什么。 */
+/* A valid PNG used as the request image. */
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
-/** 400 里那句上游报错带的请求编号。它属于**上游细节**,界面上一律不该出现 ——
-    用例拿它当探针:出现了就说明上游原文漏到了用户眼前。 */
-const REJECT_REQUEST_ID = 'req_01REJECTPROBE';
-
-/** 一轮回话的 SSE 脚本:一句话就结束,agent 不必再要下一轮。 */
-const SSE_REPLY = [
-  'event: message_start',
-  'data: {"type":"message_start","message":{"id":"msg_stub","type":"message","role":"assistant","model":"stub","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
-  '',
-  'event: content_block_start',
-  'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-  '',
-  'event: content_block_delta',
-  'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"收到这张图。"}}',
-  '',
-  'event: content_block_stop',
-  'data: {"type":"content_block_stop","index":0}',
-  '',
-  'event: message_delta',
-  'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}',
-  '',
-  'event: message_stop',
-  'data: {"type":"message_stop"}',
-  '',
-  '',
-].join('\n');
+if (!process.env.AIPM_REAL_TEXT_ONLY_MODEL) {
+  throw new Error('authorized rejection configuration missing: AIPM_REAL_TEXT_ONLY_MODEL');
+}
 
 interface Captured {
   path: string;
   body: Record<string, unknown>;
 }
 
-const captured: Captured[] = [];
-
-/** 这一轮假 API 收不收图。收,就照 SSE 脚本正常结束;不收,回 400 —— 与真实 API
-    在模型不支持图像时给的东西同一形态。 */
-let rejectImages = false;
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
-    let raw = '';
-    req.on('data', (chunk: Buffer) => {
-      raw += chunk.toString('utf8');
-    });
-    req.on('end', () => resolve(raw));
-  });
-}
+const recorder = await realModelRecorder();
+const captured: Captured[] = recorder.captured;
 
 /** 请求体里的 image 内容块。 */
 function imagesIn(body: Record<string, unknown>): unknown[] {
@@ -99,61 +56,13 @@ function imagesIn(body: Record<string, unknown>): unknown[] {
   return out;
 }
 
-const stub = createServer((req: IncomingMessage, res: ServerResponse) => {
-  void (async () => {
-    const path = (req.url ?? '/').split('?')[0]!;
-    const raw = await readBody(req);
-    let body: Record<string, unknown> = {};
-    try {
-      body = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      body = { _unparsed: raw.slice(0, 200) };
-    }
-    captured.push({ path, body });
-    /* 计数接口:有的客户端在发正文前先问一次 token 数。 */
-    if (path.endsWith('/count_tokens')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ input_tokens: 1 }));
-      return;
-    }
-    if (rejectImages && imagesIn(body).length > 0) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          type: 'error',
-          error: {
-            type: 'invalid_request_error',
-            message: `messages.0.content.1.image.source.base64: This model does not support image inputs. Request id ${REJECT_REQUEST_ID}`,
-          },
-        }),
-      );
-      return;
-    }
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    res.end(SSE_REPLY);
-  })();
-});
-
-await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', () => resolve()));
-const stubPort = (stub.address() as AddressInfo).port;
-const stubBase = `http://127.0.0.1:${stubPort}`;
-
 const scratch = join(process.cwd(), '..', 'meta', 'image-model-check');
 mkdirSync(scratch, { recursive: true });
 
-/* CLI 子进程继承的是进程环境:把模型地址指到假 API 上,这一轮就不会打到真的
-   那一侧。SDK 的 options.env 只覆盖它自己拼的那份,进程环境是它的底座。 */
-process.env.ANTHROPIC_BASE_URL = stubBase;
-process.env.ANTHROPIC_API_KEY = 'image-model-check';
-process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-
 const config = loadConfig({
-  ANTHROPIC_API_KEY: 'image-model-check',
-  ANTHROPIC_BASE_URL: stubBase,
-  MODEL: 'claude-opus-5',
+  ANTHROPIC_API_KEY: recorder.apiKey,
+  ANTHROPIC_BASE_URL: recorder.base,
+  MODEL: recorder.model,
   MAX_TURNS: '2',
   MAX_BUDGET_USD: '0.1',
   DAILY_BUDGET_USD: '0',
@@ -196,7 +105,7 @@ const outcome = await runAgent({
 });
 
 const messages = captured.filter((c) => c.path.endsWith('/messages'));
-check('假 API 收到了恰好一次模型调用', messages.length === 1, `实际 ${messages.length} 次:${captured.map((c) => c.path).join(', ')}`);
+check('真实 API 收到了恰好一次模型调用', messages.length === 1, `实际 ${messages.length} 次:${captured.map((c) => c.path).join(', ')}`);
 check('这一轮正常结束', outcome.ok, `${outcome.code ?? ''} ${outcome.message ?? ''}/ 回答:${answer.join('').slice(0, 40)}`);
 
 const first = messages[0];
@@ -267,8 +176,9 @@ check('对照:这一轮同样正常结束', second.ok, second.message ?? '');
    而回答根本没看过那张图。整条消息流里唯一能看出这件事的是 CLI 为此发的合成
    assistant 消息,下面这几条断言量的就是「我们认出了它,并且没有把上游原文
    端给用户」。 */
-rejectImages = true;
+config.model = process.env.AIPM_REAL_TEXT_ONLY_MODEL;
 captured.length = 0;
+recorder.responses.length = 0;
 const rejectedAnswer: string[] = [];
 const rejected = await runAgent({
   message: '这张图里画的是什么?',
@@ -284,6 +194,8 @@ const rejected = await runAgent({
 });
 
 const rejectedCalls = captured.filter((c) => c.path.endsWith('/messages'));
+const rejectedResponse = recorder.responses.find(response => response.status >= 400);
+check('拒收响应包含实际请求编号', Boolean(rejectedResponse?.requestId));
 check('拒收的那一轮:第一次调用确实带着图', imagesIn(rejectedCalls[0]?.body ?? {}).length === 1, `调用 ${rejectedCalls.length} 次`);
 check('拒收的那一轮:没有当成成功', !rejected.ok, `ok=${rejected.ok} numTurns=${rejected.numTurns}`);
 check('拒收的那一轮:错误码是 image_unsupported', rejected.code === 'image_unsupported', String(rejected.code));
@@ -294,7 +206,7 @@ check(
 );
 check(
   '拒收的那一轮:上游原文没有跟着这句话出去',
-  !String(rejected.message).includes(REJECT_REQUEST_ID) &&
+  Boolean(rejectedResponse?.requestId) && !String(rejected.message).includes(rejectedResponse!.requestId!) &&
     !/does not support image inputs/i.test(String(rejected.message)),
   String(rejected.message),
 );
@@ -304,7 +216,7 @@ check(
   JSON.stringify(rejectedAnswer),
 );
 
-stub.close();
+recorder.server.close();
 
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}`);
 process.exit(failed === 0 ? 0 : 1);

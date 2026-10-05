@@ -14,39 +14,34 @@ import { DailyBudget } from './budget.ts';
 import { initSseResponse, writeSseEvent, startHeartbeat } from './sse.ts';
 
 import { INDEX_UNAVAILABLE, resolveRequestPage } from "./annotation-proposal.ts";
-
-// ---- SSE 帧写入(用 stub ServerResponse) ----
-{
-  const chunks: Buffer[] = [];
-  const res = {
-    _headers: {} as Record<string, unknown>,
-    writeHead: (status: number, headers: Record<string, unknown>) => {
-      res._headers = { status, ...headers };
-    },
-    flushHeaders: () => {},
-    write: (c: string | Buffer) => {
-      chunks.push(Buffer.from(c));
-      return true;
-    },
-    end: () => {},
-  } as unknown as import('node:http').ServerResponse & { _headers: Record<string, unknown> };
-
-  initSseResponse(res, { 'Access-Control-Allow-Origin': 'https://aipm.ac' });
-  check('SSE: Content-Type', res._headers['Content-Type'] === 'text/event-stream; charset=utf-8', String(res._headers['Content-Type']));
-  writeSseEvent(res, 'ready', { requestId: 'abc' });
-  writeSseEvent(res, 'delta', { text: '你好' });
-  writeSseEvent(res, 'done', { costUsd: 0.01 });
-  const text = Buffer.concat(chunks).toString('utf8');
-  check('SSE: 事件帧格式', text.includes('event: ready\ndata: {"requestId":"abc"}\n\n'), JSON.stringify(text.slice(0, 60)));
-  check('SSE: 多事件串联', text.includes('event: delta\ndata: {"text":"你好"}\n\n'), 'ok');
-  const stopHb = startHeartbeat(res, 5);
-  await new Promise((r) => setTimeout(r, 15));
-  const withHb = Buffer.concat(chunks).toString('utf8');
-  check('SSE: 心跳注释行', withHb.includes(': ping\n\n'), 'ok');
-  stopHb();
-}
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 
 let failed = 0;
+
+// SSE over an actual loopback HTTP connection.
+{
+  const server = createServer((_req, res) => {
+    initSseResponse(res, { 'Access-Control-Allow-Origin': 'https://aipm.ac' });
+    writeSseEvent(res, 'ready', { requestId: 'abc' });
+    writeSseEvent(res, 'delta', { text: '你好' });
+    writeSseEvent(res, 'done', { costUsd: 0.01 });
+    const stopHb = startHeartbeat(res, 5);
+    setTimeout(() => { stopHb(); res.end(); }, 20);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  check('SSE: Content-Type', response.headers.get('content-type') === 'text/event-stream; charset=utf-8', String(response.headers.get('content-type')));
+  const text = await response.text();
+  check('SSE: 事件帧格式', text.includes('event: ready\ndata: {"requestId":"abc"}\n\n'), JSON.stringify(text.slice(0, 60)));
+  check('SSE: 多事件串联', text.includes('event: delta\ndata: {"text":"你好"}\n\n'), 'ok');
+  check('SSE: 心跳注释行', text.includes(': ping\n\n'), 'ok');
+  server.close();
+  await once(server, 'close');
+}
+
 function check(name: string, cond: boolean, detail = ''): void {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? '  [' + detail + ']' : ''}`);
   if (!cond) failed++;
