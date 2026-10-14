@@ -46,6 +46,7 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `PORT` / `HOST` | 监听端口(默认 8787)与绑定地址(默认 `127.0.0.1`,仅回环;公网暴露需显式 `0.0.0.0` 并自备防护) |
 | `ANTHROPIC_API_KEY` | 必填,缺失时启动快速失败 |
 | `SITE_BASE` | 站点根(默认 `https://aipm.ac`),检索结果与页面链接的拼接基址 |
+| `ANNOTATION_API_BASE` / `ANNOTATION_API_KEY` | 批注服务地址；可选服务凭据只由 Agent 后端发送 `X-API-Key`，与页面用户会话分开。批注读取另用当前页面的 `X-AIPM-Annotation-Token`，不进入 prompt、工具参数或日志 |
 | `MODEL` / `EFFORT` / `MAX_BUDGET_USD` / `MAX_TURNS` | SDK 会话参数(预算与轮数由 SDK 强制) |
 | `SEARCH_INDEX_URL` / `INDEX_REFRESH_MS` | 索引地址与后台刷新间隔(默认 30 分钟) |
 | `ALLOWED_ORIGINS` | 精确 Origin 白名单,逗号分隔,无通配符、无凭据 |
@@ -71,7 +72,12 @@ npm run context-check   # /api/chat 的语境校验自检(要 npm 依赖,不联�
 npm run image-check     # 位图语境的动态回归(要 npm 依赖,不联网):假模型 API + 真跑一轮,断言模型请求里有 image 内容块
 npm run cli -- --check-config   # 无 key 断言工具面配置组装正确
 npm run cli -- --prompt "什么是 RAG?"   # 真跑一轮 agent
+npm run check:annotation-read   # 启动隔离目标批注服务，走真实 HTTP 与一次性许可流程验证权限和分页
 ```
+
+### 批注读取
+
+`list_article_annotations(offset?, limit?)` 读取当前文章的公开批注与当前用户私有批注；匿名用户只读公开内容。`read_annotation_thread(annotation_id, reply_offset?, reply_limit?)` 读取单条批注和分页回复。文章路径由服务端从本轮页面请求校验后绑定，用户会话仅从页面请求头传入，模型参数不能更改身份或文章。仅本机记录不会自动进入请求；服务返回的正文与回复都按不可信数据呈现。写入仍通过 `propose_annotation` 返回建议，并由用户在页面确认后使用其会话提交。
 
 健康检查:`curl http://127.0.0.1:8787/healthz` → `{ok, indexDocs, stale, ...}`。
 
