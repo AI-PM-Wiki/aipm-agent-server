@@ -55,6 +55,7 @@ export class AnnotationReader {
   }
 
   async list(offset: number, limit: number): Promise<string> {
+    await this.validateIdentity();
     const publicAnnotations = await this.listScope('public');
     const ownAnnotations = this.token === null ? [] : await this.listScope('mine');
     const byId = new Map<string, z.infer<typeof AnnotationSchema>>();
@@ -85,6 +86,7 @@ export class AnnotationReader {
   }
 
   async readThread(id: string, replyOffset: number, replyLimit: number): Promise<string> {
+    await this.validateIdentity();
     const url = new URL(`/api/annotations/${encodeURIComponent(id)}`, this.apiBase);
     const response = await fetch(url, {
       headers: this.requestHeaders(),
@@ -140,6 +142,16 @@ export class AnnotationReader {
     if (this.apiKey.length > 0) headers['X-API-Key'] = this.apiKey;
     if (this.token !== null) headers.Authorization = `Bearer ${this.token}`;
     return headers;
+  }
+
+  private async validateIdentity(): Promise<void> {
+    if (this.token === null) return;
+    const response = await fetch(new URL('/api/auth/me', this.apiBase), {
+      headers: this.requestHeaders(),
+      signal: this.signal,
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`批注服务身份验证失败：HTTP ${response.status}`);
   }
 }
 

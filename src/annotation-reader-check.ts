@@ -43,21 +43,6 @@ interface RunningService {
   stop: () => Promise<string>;
 }
 
-function sessionFixture(githubId: number, login: string, expiresAt: string): SessionFixture {
-  const token = randomBytes(32).toString('base64url');
-  return {
-    token,
-    record: {
-      tokenHash: createHash('sha256').update(token).digest('hex'),
-      githubId,
-      login,
-      createdAt: new Date().toISOString(),
-      expiresAt,
-      revoked: false,
-    },
-  };
-}
-
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolveListen, reject) => {
@@ -81,14 +66,39 @@ async function startService(apiKeyEnabled: boolean): Promise<{
 }> {
   await mkdir(evidenceRoot, { recursive: true });
   const dataDir = await mkdtemp(join(evidenceRoot, 'annotation-read-'));
-  const now = Date.now();
-  const accountA = sessionFixture(701001, 'read-test-a', new Date(now + 3_600_000).toISOString());
-  const accountB = sessionFixture(701002, 'read-test-b', new Date(now + 3_600_000).toISOString());
-  const expired = sessionFixture(701003, 'read-test-expired', new Date(now - 1_000).toISOString());
+  const [{ AuthService }, { loadConfig }, { AnnotationStore }] = await Promise.all([
+    import(join(annotationRoot, 'src/auth.ts')),
+    import(join(annotationRoot, 'src/config.ts')),
+    import(join(annotationRoot, 'src/store.ts')),
+  ]);
+  const store = new AnnotationStore(dataDir);
+  const environment = {
+    ...process.env,
+    DATA_DIR: dataDir,
+    SITE_BASE: siteBase,
+    GITHUB_CLIENT_ID: 'isolated-read-test',
+    GITHUB_CLIENT_SECRET: 'isolated-read-test',
+    DEV_AUTH_BYPASS: 'false',
+  };
+  const accountAuth = new AuthService(loadConfig({ ...environment, SESSION_TTL_MS: '3600000' }), store);
+  const accountAToken = accountAuth.issueSession({ githubId: 701001, login: 'read-test-a' });
+  const accountBToken = accountAuth.issueSession({ githubId: 701002, login: 'read-test-b' });
+  const expiredAuth = new AuthService(loadConfig({ ...environment, SESSION_TTL_MS: '60000' }), store);
+  const expiredToken = expiredAuth.issueSession({ githubId: 701003, login: 'read-test-expired' });
+  const sessionFor = (token: string): SessionFixture => {
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const record = store.sessions.find((session: SessionFixture['record']) => session.tokenHash === tokenHash);
+    assert.ok(record);
+    return { token, record };
+  };
+  const accountA = sessionFor(accountAToken);
+  const accountB = sessionFor(accountBToken);
+  const expired = sessionFor(expiredToken);
+  await store.flush();
   await writeFile(join(dataDir, 'store.json'), JSON.stringify({
     version: 1,
     annotations: [],
-    sessions: [accountA.record, accountB.record, expired.record],
+    sessions: store.sessions,
     operations: [],
   }));
 
@@ -353,7 +363,15 @@ async function runMode(apiKeyEnabled: boolean): Promise<void> {
     assert.equal(new Set([...firstReplies, ...secondReplies].map((reply) => reply.id)).size, 7);
 
     await assert.rejects(reader(service, article, 'invalid-session-token').list(0, 10), /HTTP 401/);
+    await delay(Math.max(0, Date.parse(expired.record.expiresAt) - Date.now()) + 25);
     await assert.rejects(reader(service, article, expired.token).list(0, 10), /HTTP 401/);
+    await assert.rejects(reader(service, article, expired.token).readThread(publicId, 0, 5), /HTTP 401/);
+    const anonymousThread = parseResult(await callMcpTool(
+      reader(service, article, null),
+      'read_annotation_thread',
+      { annotation_id: publicId, reply_offset: 0, reply_limit: 5 },
+    ));
+    assert.equal((anonymousThread.annotation as { id: string }).id, publicId);
     assert.ok(!JSON.stringify({ ownerA, ownerB, anonymous, first, second }).includes(accountA.token));
     assert.ok(service.apiKey.length === 0 ||
       !JSON.stringify({ ownerA, ownerB, anonymous, first, second }).includes(service.apiKey));
