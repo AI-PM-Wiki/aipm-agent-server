@@ -25,6 +25,7 @@ import { proposalPage } from './annotation-proposal.ts';
 import type { ChatTurn } from './history.ts';
 import type { SourcesEvent } from './tools.ts';
 import { createWikiMcpServer } from './tools.ts';
+import { AnnotationReader } from './annotation-reader.ts';
 import type { WikiIndex } from './search.ts';
 
 export type AgentErrorCode =
@@ -66,6 +67,10 @@ export interface AgentInput {
   context?: ContextItem[];
   /** 服务端核对过的本轮页面；null 表示旧请求没有提供页面。 */
   proposalPage?: string | null;
+  /** 用户当前打开的文章，由 HTTP 层校验后绑定。 */
+  annotationPage?: string | null;
+  /** 页面会话凭据仅用于服务端读取；不会加入 prompt 或工具参数。 */
+  annotationToken?: string | null;
   config: Config;
   index: WikiIndex;
   callbacks: AgentCallbacks;
@@ -120,6 +125,8 @@ export interface BuildOptionsInput {
   history?: ChatTurn[];
   context?: ContextItem[];
   proposalPage?: string | null;
+  annotationPage?: string | null;
+  annotationToken?: string | null;
 }
 
 export function buildAgentOptions(
@@ -143,6 +150,15 @@ export function buildAgentOptions(
       /* 建议只针对服务端核对过的本轮页面；工具参数不接收目标页面。 */
       proposalPage: currentPage,
       onProposal: callbacks.onProposal,
+      annotationReader: input.annotationPage === undefined || input.annotationPage === null
+        ? null
+        : new AnnotationReader({
+          apiBase: config.annotationApiBase,
+          apiKey: config.annotationApiKey,
+          page: input.annotationPage,
+          token: input.annotationToken ?? null,
+          signal: abortController.signal,
+        }),
     }),
   };
 

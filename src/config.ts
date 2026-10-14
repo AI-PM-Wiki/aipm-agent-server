@@ -16,6 +16,8 @@ export interface Config {
   maxBudgetUsd: number;
   maxTurns: number;
   siteBase: string;
+  annotationApiBase: string;
+  annotationApiKey: string;
   searchIndexUrl: string;
   indexRefreshMs: number;
   allowedOrigins: string[];
@@ -44,6 +46,8 @@ const EnvSchema = z.object({
   MAX_BUDGET_USD: z.coerce.number().positive().default(0.3),
   MAX_TURNS: z.coerce.number().int().min(1).max(100).default(8),
   SITE_BASE: z.string().url().default('https://aipm.ac'),
+  ANNOTATION_API_BASE: z.string().url().default('https://anno-api.nvc.ac'),
+  ANNOTATION_API_KEY: z.string().default(''),
   SEARCH_INDEX_URL: z
     .string()
     .url()
@@ -102,6 +106,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxBudgetUsd: e.MAX_BUDGET_USD,
     maxTurns: e.MAX_TURNS,
     siteBase: e.SITE_BASE.replace(/\/+$/, ''),
+    annotationApiBase: e.ANNOTATION_API_BASE.replace(/\/+$/, ''),
+    annotationApiKey: e.ANNOTATION_API_KEY,
     searchIndexUrl: e.SEARCH_INDEX_URL,
     indexRefreshMs: e.INDEX_REFRESH_MS,
     allowedOrigins: e.ALLOWED_ORIGINS.split(',')
