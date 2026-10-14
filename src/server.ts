@@ -115,6 +115,7 @@ export function createApp(deps: ServerDeps) {
     const headers: Record<string, string> = { Vary: 'Origin' };
     if (origin !== undefined && config.allowedOrigins.includes(origin)) {
       headers['Access-Control-Allow-Origin'] = origin;
+      headers['Access-Control-Expose-Headers'] = 'Retry-After';
     }
     return headers;
   }
