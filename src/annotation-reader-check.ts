@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -132,7 +132,10 @@ async function startService(apiKeyEnabled: boolean): Promise<{
   const base = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`隔离批注服务未能启动，退出码 ${child.exitCode}`);
+    if (child.exitCode !== null) {
+      await rm(dataDir, { recursive: true });
+      throw new Error(`隔离批注服务未能启动，退出码 ${child.exitCode}：${output}`);
+    }
     try {
       const health = await fetch(`${base}/healthz`);
       if (health.ok) break;
@@ -142,7 +145,20 @@ async function startService(apiKeyEnabled: boolean): Promise<{
     }
   }
   const health = await fetch(`${base}/healthz`).catch(() => null);
-  assert.ok(health?.ok, '隔离批注服务未在 30 秒内就绪');
+  if (!health?.ok) {
+    if (child.exitCode === null) {
+      child.kill('SIGTERM');
+      await new Promise<void>((resolveExit, reject) => {
+        const timer = setTimeout(() => reject(new Error('隔离批注服务未及时退出')), 5_000);
+        child.once('exit', () => {
+          clearTimeout(timer);
+          resolveExit();
+        });
+      });
+    }
+    await rm(dataDir, { recursive: true });
+    throw new Error(`隔离批注服务未在 30 秒内就绪：${output}`);
+  }
 
   return {
     service: {
@@ -161,7 +177,9 @@ async function startService(apiKeyEnabled: boolean): Promise<{
             });
           });
         }
-        return output;
+        const logs = output;
+        await rm(dataDir, { recursive: true });
+        return logs;
       },
     },
     accountA,
