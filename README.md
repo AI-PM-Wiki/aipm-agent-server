@@ -53,7 +53,7 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` / `CONCURRENCY_LIMIT` | 每 IP 滑动窗口限流 + 并发信号量(成本护栏) |
 | `QUEUE_LIMIT` / `QUEUE_WAIT_MS` | 并发满时排队深度(默认 10)与等待上限(默认 60s),超限 503 + Retry-After |
 | `API_KEY` | **无 Origin 请求**(curl/脚本/爬虫)须携带 `X-API-Key` 头,否则 401;留空 = 不校验。浏览器请求由 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,本层防无差别扫描,针对性攻击由日预算兜底 |
-| `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。**预占-结算**:请求先原子预占单轮上限(`MAX_BUDGET_USD`),执行后按实际成本结算,并发/失败路径自动释放——不会因「先检查后记账」的竞态窗口超支。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
+| `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。请求先原子预占单轮上限(`MAX_BUDGET_USD`)，已知费用按实际值结算，明确零费用释放预占；取消、超时或异常导致费用未知时保留预占，直到取得可信用量或现有日切／进程重启。执行前拒绝的请求释放预占。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
 | `BODY_LIMIT_BYTES` / `BODY_TIMEOUT_MS` | 请求体上限(默认 64 KiB,超限 413)与读取超时(默认 15s,慢速 POST 防 DoS) |
 | `MAX_RUN_MS` | 单轮问答墙钟上限(默认 120s):到点强制中止(SSE `error` 帧,code `internal`),防 agent 挂死 |
 | `SCRATCH_DIR` | SDK 子进程工作目录(默认 `/tmp/aipm-agent-scratch`) |
@@ -147,7 +147,7 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 预校验失败(400/401/403/408/413/429/503)返回纯 JSON,非 SSE;其中 429 的
 `code` 为 `rate_limited` / `budget_exhausted`(JSON 码,不是流内事件)。流内
 `error` 帧只有上表 5 个 code(墙钟超时 `MAX_RUN_MS` 也走 `internal` 帧)。
-客户端断连即 abort,停止计费。
+客户端断连触发 abort；已知费用正常结算，未取得用量的请求保留预算预占。
 
 ### 模型不收图时的那一帧(`image_unsupported`)
 

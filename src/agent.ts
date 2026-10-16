@@ -362,6 +362,9 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
   const extractor = new StreamTextExtractor();
   const carriedImages = contextImages(input.context ?? []).length > 0;
   let lastResult: SDKResultMessage | null = null;
+  const accounting = () => lastResult === null ? {} : {
+    usage: lastResult.usage, costUsd: lastResult.total_cost_usd, numTurns: lastResult.num_turns,
+  };
   let initInfo: { tools: string[]; mcpServers: { name: string; status: string }[]; model: string } | null = null;
 
   try {
@@ -401,17 +404,17 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
     }
   } catch (err) {
     if (signal?.aborted) {
-      return { ok: false, code: 'internal', message: 'aborted' };
+      return { ok: false, code: 'internal', message: 'aborted', ...accounting() };
     }
     const message = err instanceof Error ? err.message : String(err);
     callbacks.onStderr?.(`SDK 流异常: ${message}`);
-    return { ok: false, code: 'internal', message, durationMs: Date.now() - startedAt };
+    return { ok: false, code: 'internal', message, durationMs: Date.now() - startedAt, ...accounting() };
   }
 
   const durationMs = Date.now() - startedAt;
 
   if (signal?.aborted) {
-    return { ok: false, code: 'internal', message: 'aborted', durationMs };
+    return { ok: false, code: 'internal', message: 'aborted', durationMs, ...accounting() };
   }
 
   if (lastResult === null) {
