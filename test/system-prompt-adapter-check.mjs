@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { completeHistorySystem as adapt } from '../dist/system-prompt-adapter.js';
+import { SYSTEM_PROMPT } from '../dist/agent.js';
+import { WIKI_MCP_INSTRUCTIONS } from '../dist/tools.js';
+import { loadConfig } from '../dist/config.js';
+
+const root = process.argv[2];
+assert.ok(root, 'retained_evidence_root_required');
+let checks = 0;
+const completeHistorySystem = (body, strategy, prompt) => adapt(body, strategy, prompt, { wiki: WIKI_MCP_INSTRUCTIONS });
+const activeInstructions = '# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## wiki\n' + WIKI_MCP_INSTRUCTIONS;
+for (const path of ['image-product-01a14925', 'png-ui-01a1494c-ready']) {
+  const original = JSON.parse(readFileSync(`${root}/${path}/product-request.body`));
+  const saved = structuredClone(original);
+  const changed = completeHistorySystem(original, 'in-history', SYSTEM_PROMPT);
+  assert.equal(changed.messages[1].content, SYSTEM_PROMPT + '\n\n' + original.messages[1].content);
+  assert.deepEqual({ ...changed, messages: original.messages }, original);
+  assert.deepEqual(changed.messages[0], original.messages[0]);
+  assert.deepEqual(changed.messages.map(m => m.role), original.messages.map(m => m.role));
+  assert.deepEqual(completeHistorySystem(changed, 'in-history', SYSTEM_PROMPT), changed);
+  assert.deepEqual(original, saved);
+  assert.equal(completeHistorySystem(original, undefined, SYSTEM_PROMPT), original);
+  assert.equal(completeHistorySystem(original, 'leading-only', SYSTEM_PROMPT), original);
+  assert.equal(completeHistorySystem(original, 'unrecognized', SYSTEM_PROMPT), original);
+  const successive = structuredClone(original);
+  successive.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'previous response retained as data' }] });
+  successive.messages.push({ role: 'user', content: [{ type: 'text', text: 'next question' }] });
+  successive.messages.push({ role: 'system', content: 'Current budget: 0.1 USD' });
+  const updated = completeHistorySystem(successive, 'in-history', SYSTEM_PROMPT);
+  assert.equal(updated.messages.at(-1).content, SYSTEM_PROMPT + '\n\n' + activeInstructions + '\n\nCurrent budget: 0.1 USD');
+  assert.equal(updated.messages.at(-1).content.includes(original.messages[1].content), false);
+  assert.deepEqual(updated.messages.slice(2, 4), successive.messages.slice(2, 4));
+  assert.deepEqual(completeHistorySystem(updated, 'in-history', SYSTEM_PROMPT), updated);
+  const blocks = structuredClone(original);
+  blocks.messages[1].content = [{ type: 'text', text: 'current supplement', cache_control: { type: 'ephemeral' } }];
+  const blockResult = completeHistorySystem(blocks, 'in-history', SYSTEM_PROMPT);
+  assert.deepEqual(blockResult.messages[1].content, [{ type: 'text', text: SYSTEM_PROMPT },
+    { type: 'text', text: activeInstructions }, ...blocks.messages[1].content]);
+  assert.deepEqual(completeHistorySystem(blockResult, 'in-history', SYSTEM_PROMPT), blockResult);
+  assert.throws(() => completeHistorySystem({ ...original, system: 'unbound' }, 'in-history', SYSTEM_PROMPT), /mismatch/);
+  const invalid = structuredClone(original); invalid.messages[1].content = [{ type: 'image', source: {} }];
+  assert.throws(() => completeHistorySystem(invalid, 'in-history', SYSTEM_PROMPT));
+  const noUpdate = { ...original, messages: [original.messages[0]] };
+  assert.deepEqual(completeHistorySystem(noUpdate, 'in-history', SYSTEM_PROMPT), noUpdate);
+  checks += 13;
+}
+assert.throws(() => loadConfig({ ANTHROPIC_API_KEY: 'local-test', SYSTEM_PROMPT_UPDATE: 'unknown' }));
+assert.throws(() => loadConfig({ ANTHROPIC_API_KEY: 'local-test', SYSTEM_PROMPT_UPDATE: 'in-history' }));
+assert.equal(loadConfig({ ANTHROPIC_API_KEY: 'local-test' }).systemPromptUpdate, undefined);
+console.log(JSON.stringify({ passed: true, checks: checks + 3, upstreamCalls: 0, scope: 'original bodies and explicit sequential input cases' }));

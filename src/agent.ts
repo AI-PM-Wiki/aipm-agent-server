@@ -24,8 +24,9 @@ import type { AnnotationProposal } from './annotation-proposal.ts';
 import { proposalPage } from './annotation-proposal.ts';
 import type { ChatTurn } from './history.ts';
 import type { SourcesEvent } from './tools.ts';
-import { createWikiMcpServer } from './tools.ts';
+import { createWikiMcpServer, WIKI_MCP_INSTRUCTIONS } from './tools.ts';
 import { AnnotationReader } from './annotation-reader.ts';
+import { openSystemPromptAdapter } from './system-prompt-adapter.ts';
 import type { WikiIndex } from './search.ts';
 
 export type AgentErrorCode =
@@ -131,7 +132,7 @@ export interface BuildOptionsInput {
 
 export function buildAgentOptions(
   input: BuildOptionsInput,
-): { prompt: string | AsyncIterable<SDKUserMessage>; options: Options } {
+): { prompt: string | AsyncIterable<SDKUserMessage>; options: Options; mcpInstructions: Readonly<Record<string, string>> } {
   const { config, index, callbacks, signal } = input;
   const currentPage = input.proposalPage === undefined
     ? proposalPage(input.context ?? []) : input.proposalPage;
@@ -143,6 +144,7 @@ export function buildAgentOptions(
     else signal.addEventListener('abort', () => abortController.abort(), { once: true });
   }
 
+  const mcpInstructions = Object.freeze({ wiki: WIKI_MCP_INSTRUCTIONS });
   const mcpServers: Record<string, McpServerConfig> = {
     wiki: createWikiMcpServer({
       index,
@@ -159,10 +161,11 @@ export function buildAgentOptions(
           token: input.annotationToken ?? null,
           signal: abortController.signal,
         }),
-    }),
+    }, mcpInstructions.wiki),
   };
 
   return {
+    mcpInstructions,
     prompt: buildPromptInput(
       input.message ?? '',
       input.history ?? [],
@@ -358,7 +361,7 @@ class StreamTextExtractor {
 export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
   const { config, callbacks, signal } = input;
   const startedAt = Date.now();
-  const { prompt, options } = buildAgentOptions(input);
+  const { prompt, options, mcpInstructions } = buildAgentOptions(input);
   const extractor = new StreamTextExtractor();
   const carriedImages = contextImages(input.context ?? []).length > 0;
   let lastResult: SDKResultMessage | null = null;
@@ -366,8 +369,19 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
     usage: lastResult.usage, costUsd: lastResult.total_cost_usd, numTurns: lastResult.num_turns,
   };
   let initInfo: { tools: string[]; mcpServers: { name: string; status: string }[]; model: string } | null = null;
+  let adapter: Awaited<ReturnType<typeof openSystemPromptAdapter>> | undefined;
 
   try {
+    if (config.systemPromptUpdate === 'in-history') {
+      if (!config.anthropicBaseUrl) throw new Error('in_history_upstream_required');
+      adapter = await openSystemPromptAdapter({
+        upstream: config.anthropicBaseUrl, apiKey: config.anthropicApiKey, model: config.model,
+        productPrompt: SYSTEM_PROMPT, signal: options.abortController!.signal,
+        maxBodyBytes: config.bodyLimitBytes, mcpInstructions: () => mcpInstructions,
+      });
+      options.env = { ...process.env, ANTHROPIC_BASE_URL: adapter.baseUrl,
+        ANTHROPIC_API_KEY: adapter.apiKey, ANTHROPIC_AUTH_TOKEN: undefined };
+    }
     for await (const message of query({ prompt, options })) {
       /* 上游把这一轮里的图摘掉了:接着跑只会得到一段「假装看过图」的回答。就地
          停下来,由界面按 image_unsupported 告诉用户去掉图片重问。 */
@@ -409,6 +423,8 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
     const message = err instanceof Error ? err.message : String(err);
     callbacks.onStderr?.(`SDK 流异常: ${message}`);
     return { ok: false, code: 'internal', message, durationMs: Date.now() - startedAt, ...accounting() };
+  } finally {
+    await adapter?.close();
   }
 
   const durationMs = Date.now() - startedAt;

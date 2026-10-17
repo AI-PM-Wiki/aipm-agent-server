@@ -48,6 +48,7 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `SITE_BASE` | 站点根(默认 `https://aipm.ac`),检索结果与页面链接的拼接基址 |
 | `ANNOTATION_API_BASE` / `ANNOTATION_API_KEY` | 批注服务地址；可选服务凭据只由 Agent 后端发送 `X-API-Key`，与页面用户会话分开。批注读取另用当前页面的 `X-AIPM-Annotation-Token`，不进入 prompt、工具参数或日志 |
 | `MODEL` / `EFFORT` / `MAX_BUDGET_USD` / `MAX_TURNS` | SDK 会话参数(预算与轮数由 SDK 强制) |
+| `SYSTEM_PROMPT_UPDATE` / `ANTHROPIC_BASE_URL` | 仅在已核实供应商与当前模型声明 `in-history` 完整替换语义时显式配置 `SYSTEM_PROMPT_UPDATE=in-history` 和对应 API base。历史 system 保留完整产品提示；末条 system 同时包含本轮 MCP 配置快照中的有效说明及本次补充状态，不累加先前预算。快照与创建 MCP server 使用同一配置，每轮独立；预算单独更新不会清空说明。说明更新或移除必须提供明确的当前快照；缺少快照、无效值或公告与快照冲突时拒绝请求。当前产品每轮使用固定 wiki 配置，未提供动态 MCP 配置入口；收到断开公告且快照仍有说明时拒绝转发，部分 MCP 移除场景需要单独支持。未配置或 `leading-only` 使用原 SDK 路径；不自动查询能力、不按模型名称推断策略。 |
 | `SEARCH_INDEX_URL` / `INDEX_REFRESH_MS` | 索引地址与后台刷新间隔(默认 30 分钟) |
 | `ALLOWED_ORIGINS` | 精确 Origin 白名单,逗号分隔,无通配符、无凭据 |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` / `CONCURRENCY_LIMIT` | 每 IP 滑动窗口限流 + 并发信号量(成本护栏) |
