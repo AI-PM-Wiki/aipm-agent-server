@@ -11,6 +11,8 @@ export interface Config {
   port: number;
   host: string;
   anthropicApiKey: string;
+  anthropicBaseUrl?: string;
+  systemPromptUpdate?: 'in-history' | 'leading-only';
   model: string;
   effort: EffortLevel;
   maxBudgetUsd: number;
@@ -41,6 +43,8 @@ const EnvSchema = z.object({
   // 绑定地址:默认仅回环 127.0.0.1(bare npm start 不暴露公网);公网暴露需显式 0.0.0.0。
   HOST: z.string().min(1).default('127.0.0.1'),
   ANTHROPIC_API_KEY: z.string().min(1),
+  ANTHROPIC_BASE_URL: z.string().url().optional(),
+  SYSTEM_PROMPT_UPDATE: z.enum(['in-history', 'leading-only']).optional(),
   MODEL: z.string().min(1).default('claude-opus-5'),
   EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
   MAX_BUDGET_USD: z.coerce.number().positive().default(0.3),
@@ -82,6 +86,8 @@ const EnvSchema = z.object({
   // 伪造头绕过每 IP 限流。默认仅回环(含 IPv6 形态 ::ffff:127.0.0.1)。
   TRUSTED_PROXY_IPS: z.string().default('127.0.0.1,::1,::ffff:127.0.0.1'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
+}).refine(e => e.SYSTEM_PROMPT_UPDATE !== 'in-history' || e.ANTHROPIC_BASE_URL !== undefined, {
+  path: ['ANTHROPIC_BASE_URL'], message: 'in-history requires an explicit upstream',
 });
 
 function parseBool(value: string): boolean {
@@ -101,6 +107,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.PORT,
     host: e.HOST,
     anthropicApiKey: e.ANTHROPIC_API_KEY,
+    anthropicBaseUrl: e.ANTHROPIC_BASE_URL,
+    systemPromptUpdate: e.SYSTEM_PROMPT_UPDATE,
     model: e.MODEL,
     effort: e.EFFORT,
     maxBudgetUsd: e.MAX_BUDGET_USD,

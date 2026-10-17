@@ -2,7 +2,8 @@
  * 每日预算护栏:按 UTC 日累计已消耗成本(基于 SDK total_cost_usd)。
  *
  * 原子预占模型(消除「检查→执行→记账」的竞态窗口):请求先 tryReserve
- * 预占单轮理论最大成本,执行后按实际成本 settle 结算,异常路径 release 释放。
+ * 预占单轮理论最大成本,执行后按已知成本 settle 结算；未知费用保留预占。
+ * 尚未执行的请求通过 release 释放。
  * Node 单线程下 tryReserve 的「检查+预占」是同步步骤,在事件循环内原子完成,
  * 并发请求不可能同时通过;即便并发 N 个请求,预占总量也不会超过预算。
  * 进程内状态,单实例假设:重启清零(README 已注明;多实例需换共享存储,记 deferred)。
@@ -75,11 +76,13 @@ export class DailyBudget {
   }
 
   /**
-   * 结算:预占转实际消耗(costUsd 可为 0/undefined 语义,未产生费用也需
-   * settle 以释放预占)。跨日时已重置的预占按 0 截断,避免负预占放大余量;
+   * 结算:明确费用转为实际消耗；未知费用保留预占。
+   * 跨日时已重置的预占按 0 截断,避免负预占放大余量;
    * 跨日成本计入新的一天(与旧 track 行为一致,边界场景可接受)。
    */
-  settle(estimateUsd: number, costUsd: number): void {
+  settle(estimateUsd: number, costUsd: number | undefined): void {
+    if (costUsd === undefined) return;
+    if (!Number.isFinite(costUsd) || costUsd < 0) throw new RangeError('invalid cost');
     this.resetIfNewDay();
     this.reserved = Math.max(0, this.reserved - estimateUsd);
     this.spent += costUsd;

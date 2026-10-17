@@ -239,7 +239,7 @@ export function createApp(deps: ServerDeps) {
 
     // 日预算护栏:原子预占(检查+预占同一同步步骤,消除并发竞态窗口)。
     // estimate = 单轮 agent 预算上限(MAX_BUDGET_USD),即理论最大单轮成本;
-    // 执行后按实际 costUsd 结算,后续各失败路径 release 释放(见各 return 前)。
+    // 执行后按已知 costUsd 结算；执行前拒绝的请求释放预占。
     const estimate = config.maxBudgetUsd;
     if (!budget.tryReserve(estimate)) {
       console.log(
@@ -473,19 +473,9 @@ export function createApp(deps: ServerDeps) {
           runTimer = null;
         }
         stopHeartbeat();
-        if (outcome !== null) {
-          // 正常/业务失败返回:按实际成本结算并释放预占(costUsd 为 0/undefined
-          // 也走 settle——未产生费用同样要把预占全额转回可用量)。
-          budget.settle(estimate, outcome.costUsd ?? 0);
-        } else {
-          // runAgent 抛异常(理论路径,其内部已兜住绝大多数错误):释放预占后
-          // 向上传播,走 handler_crash 的既有销毁路径。
-          budget.release(estimate);
-        }
+        budget.settle(estimate, outcome?.costUsd);
       }
       if (outcome === null) {
-        // 不可达:runAgent 要么返回 outcome、要么抛异常(异常已在 finally 释放
-        // 预占后重新抛出)。此处防御性抛出,避免后续对 null 解引用。
         throw new Error('runAgent 未返回结果');
       }
 

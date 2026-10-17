@@ -91,7 +91,13 @@ function textResult(text: string, isError = false): {
   return { content: [{ type: 'text', text }], isError };
 }
 
-export function createWikiMcpServer(deps: McpServerDeps): McpSdkServerConfigWithInstance {
+export const WIKI_MCP_INSTRUCTIONS =
+  '提供 AI-PM Wiki(https://aipm.ac/)站内文档检索与页面读取。' +
+  '检索用 search_wiki 取候选,再对最相关页面用 read_wiki_page 读全文。' +
+  '可用 list_article_annotations 和 read_annotation_thread 读取当前文章的已有讨论。' +
+  '用户要求划重点、写批注或评论时,用 propose_annotation 提建议(它不直接写入)。';
+
+export function createWikiMcpServer(deps: McpServerDeps, instructions = WIKI_MCP_INSTRUCTIONS): McpSdkServerConfigWithInstance {
   const { index, onSources, proposalPage, annotationReader, onProposal } = deps;
   /* 这一轮的序号:建议的 id 按它的先后排(p1、p2…),同一个工具调用重放也认得出。 */
   let proposed = 0;
@@ -99,11 +105,7 @@ export function createWikiMcpServer(deps: McpServerDeps): McpSdkServerConfigWith
     name: 'wiki',
     version: '0.1.0',
     alwaysLoad: true,
-    instructions:
-      '提供 AI-PM Wiki(https://aipm.ac/)站内文档检索与页面读取。' +
-      '检索用 search_wiki 取候选,再对最相关页面用 read_wiki_page 读全文。' +
-      '可用 list_article_annotations 和 read_annotation_thread 读取当前文章的已有讨论。' +
-      '用户要求划重点、写批注或评论时,用 propose_annotation 提建议(它不直接写入)。',
+    instructions,
     tools: [
       tool(
         'search_wiki',
