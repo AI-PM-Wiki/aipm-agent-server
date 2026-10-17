@@ -90,7 +90,7 @@ const KIND_LABEL: Record<ContextItem['kind'], string> = {
     是源码、是图里的字、还是图像本身。 */
 const CHART_LABEL: Record<ChartKind, string> = {
   mermaid: 'Mermaid 图(源码见下)',
-  svg: 'SVG 图(只有图里写的文字,图形本身没有送过来)',
+  svg: 'SVG 图(文本语境：图中文字或受限静态源码；未附带位图)',
   image: '位图(只有文字说明,看不到图像内容)',
 };
 
@@ -106,7 +106,7 @@ function chartTypeLine(item: ContextItem): string {
 /** chart 专有的那一行用哪个名字。 */
 const CHART_TEXT_LABEL: Record<ChartKind, string> = {
   mermaid: '源码',
-  svg: '图里的文字',
+  svg: 'SVG 文本语境',
   image: '说明',
 };
 
