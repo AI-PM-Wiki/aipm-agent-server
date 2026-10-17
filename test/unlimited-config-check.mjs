@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {loadConfig} from '../dist/config.js';
+import {buildAgentOptions} from '../dist/agent.js';
+import {WikiIndex} from '../dist/search.js';
+const scratch=process.argv[2];assert.ok(scratch);
+const input={ANTHROPIC_API_KEY:'localhost-configuration-check',SCRATCH_DIR:scratch};
+const defaults=loadConfig(input);assert.equal(defaults.maxBudgetUsd,0.3);assert.equal(defaults.maxTurns,8);
+const config=loadConfig({...input,MAX_BUDGET_USD:'0',MAX_TURNS:'0',DAILY_BUDGET_USD:'0'});
+assert.equal(config.maxBudgetUsd,0);assert.equal(config.maxTurns,0);assert.equal(config.dailyBudgetUsd,0);
+assert.throws(()=>loadConfig({...input,MAX_BUDGET_USD:'-1'}));
+assert.throws(()=>loadConfig({...input,MAX_TURNS:'-1'}));
+assert.throws(()=>loadConfig({...input,MAX_BUDGET_USD:'0'}));
+const index=WikiIndex.fromDocs([],'http://127.0.0.1:8015');
+const built=buildAgentOptions({config,index,callbacks:{}});
+assert.equal(built.options.maxBudgetUsd,undefined);assert.equal(built.options.maxTurns,undefined);
+await built.options.mcpServers.wiki.instance.close();index.stop();
+console.log(JSON.stringify({passed:true,defaultsPreserved:true,explicitZeroDisablesSdkLimits:true,upstreamRequests:0}));
