@@ -61,6 +61,22 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `TRUST_PROXY` | 置 `true` **且直连来源属于 `TRUSTED_PROXY_IPS`(默认回环)** 时,才从 `Fly-Client-IP` / `cf-connecting-ip` 取客户端 IP;否则忽略转发头、回落 socket 地址。直连暴露(`HOST=0.0.0.0`)时不会信任任意来源的伪造转发头,每 IP 限流无法被绕过 |
 | `TRUSTED_PROXY_IPS` | 可信代理 IP 列表,逗号分隔(默认 `127.0.0.1,::1,::ffff:127.0.0.1`):仅当 `TRUST_PROXY=true` 且连接来自这些地址时才读取转发头 |
 
+## 全文 AI 总结
+
+`GET /api/summary?page=/ai/rag/` 返回同一份思维导图与 AI 精读，沿用 Origin、API Key、每 IP 限流及并发队列。请求仅包含文章路径，正文与章节锚点由服务端索引提供。全文读取支持超过 12,000 字符的文章；超过 `SUMMARY_MAX_CHARS` 时返回 422。
+
+首次访问并行请求两个生成任务，结果通过 Zod 校验，并核对全部引用锚点。两个任务共享 `DAILY_BUDGET_USD`，按照 `SUMMARY_INPUT_COST_PER_MTOK`、`SUMMARY_OUTPUT_COST_PER_MTOK` 预留费用，再按响应用量结算；上游费用未知时保留预留额度。`SUMMARY_MODEL` 缺省为 `claude-haiku-4-5`，修改模型时应同步配置费率。每个任务最多输出 `SUMMARY_MAX_TOKENS`，缺省为 6000，超时沿用 `MAX_RUN_MS`。
+
+缓存键包含完整文章内容、章节锚点、模型及生成规则版本。单进程中的同页并发请求共用生成任务；共享缓存目录的进程使用原子文件发布，读取首次发布成功的结果。浏览器断开连接后服务端继续完成共享生成。生成或校验失败时返回错误，后续请求可以重试。
+
+缓存目录为 `SUMMARY_CACHE_DIR`，缺省 `./data/summaries`；Docker Compose 使用 `summary-data` 持久卷，重新部署保留结果。文章、模型或生成规则版本变化会产生新记录。缓存命中直接读取已有结果，不占用模型预算。多实例部署需要共享缓存目录，同时配置集中管理的预算与限流；当前预算和限流保存在单个进程中。
+
+前端 `window.__aipmSummary.createView({host, navigate, continueChat?})` 提供独立展示组件，支持 `setLoading()`、`setData(summary)`、`setError(message, retry?)` 和 `dispose()`。页头面板和助手消息共同使用该组件。`navigate` 接收文章路径及章节锚点；省略 `continueChat` 时作为静态总结展示。思维导图使用 Mermaid，AI 生成的文字通过文本节点展示。
+
+继续讨论时，`POST /api/chat` 可以附带 `summaryRevision`。服务端核对当前文章和版本号，从共享缓存读取完整总结作为模型语境；文章或模型已经变化、缓存不可用时返回 409 `summary_stale`。这条通路直接复用已有总结。
+
+真实模型及浏览器验收入口见主仓库 `test/browser/article_summary_stack.py` 与 `check_article_summary_ego.mjs`，需要配置已授权的 `AIPM_REAL_MODEL_*` 环境变量。
+
 ## 开发与运行
 
 ```bash

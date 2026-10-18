@@ -23,6 +23,8 @@ import { truncateHistory } from './history.ts';
 import { annotationPageFromPath } from './annotation-reader.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
+import { ArticleSummaryService, SummaryError } from './article-summary.ts';
+import type { ArticleSummary } from './article-summary.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
 
 /**
@@ -80,6 +82,7 @@ export const ChatBodySchema = z.object({
   /* 缺省为空数组:老客户端不带这个字段,拿到的行为与加它之前完全一致。 */
   context: z.array(ContextItemSchema).max(CONTEXT_MAX_ITEMS).default([]),
   page: z.string().max(512).optional(),
+  summaryRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 interface ServerDeps {
@@ -98,6 +101,7 @@ export function createApp(deps: ServerDeps) {
     waitMs: config.queueWaitMs,
   });
   const budget = new DailyBudget(config.dailyBudgetUsd);
+  const summaries = new ArticleSummaryService(config, budget, semaphore);
   const startedAt = Date.now();
 
   function originAllowed(origin: string | undefined): boolean {
@@ -395,6 +399,17 @@ export function createApp(deps: ServerDeps) {
       }
 
       const history = truncateHistory(parsed.history);
+      let summary: ArticleSummary | undefined;
+      if (parsed.summaryRevision) {
+        const article = proposalPage ? index.readSummaryArticle(proposalPage) : null;
+        const cached = article ? await summaries.readCached(article, parsed.summaryRevision) : null;
+        if (!cached) {
+          budget.release(estimate);
+          sendError(req, res, 409, 'summary_stale', '文章总结已更新，请重新打开 AI 总结后继续讨论。', corsHeaders);
+          return;
+        }
+        summary = cached;
+      }
 
       // —— 进入 SSE 流 ——
       // corsHeadersFor 已保证仅白名单 Origin 带 ACAO,直接复用
@@ -431,6 +446,7 @@ export function createApp(deps: ServerDeps) {
         outcome = await runAgent({
           message: parsed.message,
           history,
+          summary,
           context: parsed.context,
           proposalPage,
           annotationPage: annotationPageFromPath(proposalPage ?? undefined, config.siteBase),
@@ -511,6 +527,58 @@ export function createApp(deps: ServerDeps) {
     }
   }
 
+  async function handleSummary(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const origin = req.headers.origin;
+    const headers = corsHeadersFor(origin);
+    if (!originAllowed(origin)) {
+      sendError(req, res, 403, 'forbidden', 'Origin 不在白名单');
+      return;
+    }
+    const key = req.headers['x-api-key'];
+    if (config.apiKey && origin === undefined && !safeEqual(typeof key === 'string' ? key : '', config.apiKey)) {
+      sendError(req, res, 401, 'unauthorized', '缺少或错误的 X-API-Key', headers);
+      return;
+    }
+    const url = new URL(req.url!, 'http://localhost');
+    const page = url.searchParams.get('page');
+    if (!page || page.length > 512 || url.searchParams.getAll('page').length !== 1 ||
+        !page.startsWith('/') || page.startsWith('//') || /[?#\\]/.test(page)) {
+      sendError(req, res, 400, 'bad_request', '需要有效的文章路径。', headers);
+      return;
+    }
+    if (!index.getStats().docCount) {
+      sendError(req, res, 503, 'index_unavailable', '文章索引暂不可用。', headers);
+      return;
+    }
+    const article = index.readSummaryArticle(page);
+    if (article === null) {
+      sendError(req, res, 404, 'page_not_found', '当前页面未收录。', headers);
+      return;
+    }
+    if (!limiter.tryAcquire(hashIp(clientIp(req)))) {
+      sendError(req, res, 429, 'rate_limited', '请求过于频繁，请稍后重试。',
+        { ...headers, 'Retry-After': String(limiter.retryAfterSec()) });
+      return;
+    }
+    try {
+      const summary = await summaries.get(article);
+      if (!res.destroyed) writeJson(res, 200, summary, headers);
+    } catch (error) {
+      if (res.destroyed) return;
+      if (error instanceof SummaryError) {
+        sendError(req, res, error.status, error.code, error.message,
+          { ...headers, ...(error.status === 429 ? { 'Retry-After': '86400' } : {}) });
+        return;
+      }
+      if (error instanceof SemaphoreError) {
+        sendError(req, res, 503, 'concurrency_limit', '服务繁忙，请稍后重试。', { ...headers, 'Retry-After': '10' });
+        return;
+      }
+      console.error(JSON.stringify({ event: 'summary_failed', type: error instanceof Error ? error.name : 'unknown' }));
+      sendError(req, res, 502, 'summary_failed', 'AI 总结生成失败，请重试。', headers);
+    }
+  }
+
   const server = createServer((req, res) => {
     const url = req.url ?? '/';
     const path = url.split('?')[0]!;
@@ -547,6 +615,11 @@ export function createApp(deps: ServerDeps) {
         concurrencyActive: semaphore.activeCount,
         uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       });
+      return;
+    }
+
+    if (method === 'GET' && path === '/api/summary') {
+      void handleSummary(req, res).catch(() => res.destroy());
       return;
     }
 

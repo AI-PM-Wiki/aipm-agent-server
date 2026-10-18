@@ -33,5 +33,6 @@ EXPOSE 8787
 # start_period 45s:首次启动需下载并分词索引,最坏 30s(fetch 超时)+ 余量
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+RUN mkdir -p /app/data && chown node:node /app/data
 USER node
 CMD ["node", "dist/server.js"]
