@@ -21,6 +21,8 @@ services:
     image: aipm-agent-server:0.1.0
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - summary-data:/app/data
     # 资源上限(保守值,防单容器吃满 VPS;按负载可调)
     deploy:
       resources:
@@ -45,3 +47,6 @@ services:
   #   command: tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
   #   environment:
   #     - TUNNEL_TOKEN=\${TUNNEL_TOKEN}
+
+volumes:
+  summary-data:

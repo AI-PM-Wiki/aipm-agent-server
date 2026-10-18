@@ -11,6 +11,13 @@ export interface IndexDoc {
   text: string;
 }
 
+export interface SummaryArticle {
+  page: string;
+  title: string;
+  text: string;
+  sections: { anchor: string; title: string }[];
+}
+
 export interface SearchHit {
   /** 页面标题(分节条目取所属页面标题,见 resolvePage) */
   title: string;
@@ -601,6 +608,26 @@ export class WikiIndex {
       if (merged !== null) return merged;
     }
     return null;
+  }
+
+  readSummaryArticle(page: string): SummaryArticle | null {
+    const resolved = this.resolvePage(page);
+    if (resolved === null) return null;
+    const path = new URL(resolved.url).pathname;
+    const location = path.replace(/^\/+/, '');
+    const docs = this.docs.filter(doc =>
+      doc.location === location || doc.location.startsWith(location + '#'));
+    if (!docs.length) return null;
+    return {
+      page: path,
+      title: resolved.title,
+      text: docs.find(doc => doc.location === location)?.text ||
+        docs.map(doc => doc.title + '\n' + doc.text).join('\n\n'),
+      sections: docs.map(doc => ({
+        anchor: doc.location.includes('#') ? doc.location.slice(doc.location.indexOf('#') + 1) : '',
+        title: doc.title,
+      })),
+    };
   }
 
   private findLocation(location: string): IndexDoc | null {

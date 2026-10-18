@@ -36,6 +36,14 @@ export interface Config {
   trustProxy: boolean;
   trustedProxyIps: string[];
   scratchDir: string;
+  summary: {
+    model: string;
+    cacheDir: string;
+    maxChars: number;
+    maxTokens: number;
+    inputCostPerMtok: number;
+    outputCostPerMtok: number;
+  };
 }
 
 const EnvSchema = z.object({
@@ -86,6 +94,12 @@ const EnvSchema = z.object({
   // 伪造头绕过每 IP 限流。默认仅回环(含 IPv6 形态 ::ffff:127.0.0.1)。
   TRUSTED_PROXY_IPS: z.string().default('127.0.0.1,::1,::ffff:127.0.0.1'),
   SCRATCH_DIR: z.string().min(1).default('/tmp/aipm-agent-scratch'),
+  SUMMARY_MODEL: z.string().min(1).default('claude-haiku-4-5'),
+  SUMMARY_CACHE_DIR: z.string().min(1).default('./data/summaries'),
+  SUMMARY_MAX_CHARS: z.coerce.number().int().min(1000).max(400_000).default(120_000),
+  SUMMARY_MAX_TOKENS: z.coerce.number().int().min(1024).max(16_000).default(6000),
+  SUMMARY_INPUT_COST_PER_MTOK: z.coerce.number().positive().default(1),
+  SUMMARY_OUTPUT_COST_PER_MTOK: z.coerce.number().positive().default(5),
 }).refine(e => e.SYSTEM_PROMPT_UPDATE !== 'in-history' || e.ANTHROPIC_BASE_URL !== undefined, {
   path: ['ANTHROPIC_BASE_URL'], message: 'in-history requires an explicit upstream',
 }).refine(e => e.MAX_BUDGET_USD !== 0 || e.DAILY_BUDGET_USD === 0, {
@@ -138,5 +152,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .map((s) => s.trim())
       .filter((s) => s.length > 0),
     scratchDir: e.SCRATCH_DIR,
+    summary: {
+      model: e.SUMMARY_MODEL,
+      cacheDir: e.SUMMARY_CACHE_DIR,
+      maxChars: e.SUMMARY_MAX_CHARS,
+      maxTokens: e.SUMMARY_MAX_TOKENS,
+      inputCostPerMtok: e.SUMMARY_INPUT_COST_PER_MTOK,
+      outputCostPerMtok: e.SUMMARY_OUTPUT_COST_PER_MTOK,
+    },
   };
 }
