@@ -1,6 +1,6 @@
 /**
  * HTTP 服务(node:http,无框架):
- *  - POST /api/chat  SSE 事件流(ready/sources/delta/done/error + 15s 心跳)
+ *  - POST /api/chat  SSE 事件流(ready/sources/proposal/delta/done/error + 15s 心跳)
  *  - GET  /healthz   索引状态
  *  - OPTIONS         预检
  * 预校验失败返回纯 JSON:400 / 401(API Key)/ 403(Origin)/ 413(体积)/
@@ -12,17 +12,61 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
+import { INDEX_UNAVAILABLE, resolveRequestPage } from "./annotation-proposal.ts";
 import { loadConfig } from './config.ts';
 import type { Config } from './config.ts';
 import { WikiIndex } from './search.ts';
 import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
+import { CHART_KINDS, CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, RASTER_MEDIA_TYPES, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
 
-const ChatBodySchema = z.object({
+/**
+ * 语境条目:用户提问时正在读的东西(划选的一段原文 / 批注面板里的一条批注 /
+ * 正文里的一张图)。
+ *
+ * `visibility` 的枚举里没有 `local` —— 「仅本机」的批注只存在浏览器里,送进对话
+ * 等于把它发到本服务并进入模型上下文。带上它的请求在这里就被拒(400),不会走到
+ * 模型那一步。前端那边也有独立的一道(见主仓库 docs/_static/js/context-item.js
+ * 的 isDeliverable)。
+ *
+ * 字段类型与长度由这里管,**跨字段的必填规则**(kind 决定 quote / body / source
+ * 谁不能为空)由 contextItemProblem 管,作为 refinement 挂在同一个 schema 上 ——
+ * 于是 HTTP 那一层只剩「400」与「继续」两种结果,校验不会漏在 schema 之外。
+ */
+const ContextItemSchema = z
+  .object({
+    kind: z.enum(['selection', 'annotation', 'chart']),
+    page: z.string().min(1).max(CONTEXT_LIMITS.page),
+    title: z.string().max(CONTEXT_LIMITS.title).default(''),
+    quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
+    prefix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+    suffix: z.string().max(CONTEXT_LIMITS.edge).default(''),
+    body: z.string().max(CONTEXT_LIMITS.body).default(''),
+    color: z.string().max(CONTEXT_LIMITS.color).default(''),
+    /* 空串 = 不是图表;三个取值与 context.ts 的 CHART_KINDS 同一组。认不出的
+       取值由 zod 在这里就挡下,不必等 contextItemProblem。 */
+    chart: z.enum(['', ...CHART_KINDS]).default(''),
+    source: z.string().max(CONTEXT_LIMITS.source).default(''),
+    /* 位图那份图像(base64)与它的媒体类型。两个默认都是空串:不带图像的文字语境
+       (mermaid 源码 / SVG 里的字 / 位图的替代文本)与加这条通路之前逐字相同。
+       长度上限就是尺寸上限,与前端 chart-context.js 的 IMAGE_MAX_BYTES 对应;
+       两者成对与否、只有 image 能带 —— 这些是跨字段规则,在 contextItemProblem 里。 */
+    mediaType: z.enum(['', ...RASTER_MEDIA_TYPES]).default(''),
+    imageData: z.string().max(CONTEXT_LIMITS.imageData).default(''),
+    visibility: z.enum(['public', 'private']).default('public'),
+  })
+  .superRefine((item, ctx) => {
+    const problem = contextItemProblem(item);
+    if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+  });
+
+/* 导出给 src/context-http-check.ts:走 HTTP 只能证明「坏的被拒」——收得下的请求
+   会一路走到模型,那是真金白银的一轮。所以「好的收得下」由 schema 本身断言。 */
+export const ChatBodySchema = z.object({
   message: z.string().min(1).max(10_000),
   history: z
     .array(
@@ -32,6 +76,9 @@ const ChatBodySchema = z.object({
       }),
     )
     .default([]),
+  /* 缺省为空数组:老客户端不带这个字段,拿到的行为与加它之前完全一致。 */
+  context: z.array(ContextItemSchema).max(CONTEXT_MAX_ITEMS).default([]),
+  page: z.string().max(512).optional(),
 });
 
 interface ServerDeps {
@@ -307,7 +354,31 @@ export function createApp(deps: ServerDeps) {
       }
       if (parsed === null) {
         budget.release(estimate);
-        sendError(req, res, 400, 'bad_request', '请求体格式不正确:需要 {message, history?}', corsHeaders);
+        sendError(
+          req,
+          res,
+          400,
+          'bad_request',
+          '请求体格式不正确:需要 {message, history?, context?};' +
+            'context 里每条要有 kind 与 page,划选必须有原文,批注的原文与正文' +
+            '至少要有一段,图表要有种类与取到的文字,可见范围只接受 public / private;' +
+            '位图的 mediaType 与 imageData 要么都给要么都不给,类型限于 PNG / JPEG / WebP / GIF',
+          corsHeaders,
+        );
+        return;
+      }
+
+      const proposalPage = resolveRequestPage(parsed.page, parsed.context, index, config.siteBase);
+      if (proposalPage === INDEX_UNAVAILABLE) {
+        budget.release(estimate);
+        sendError(req, res, 503, "index_unavailable", "文章索引暂不可用，请稍后重试", {
+          'Retry-After': '10', ...corsHeaders,
+        });
+        return;
+      }
+      if (proposalPage === undefined) {
+        budget.release(estimate);
+        sendError(req, res, 400, "bad_request", "当前页面无效、未收录或与语境页面不一致", corsHeaders);
         return;
       }
 
@@ -324,12 +395,13 @@ export function createApp(deps: ServerDeps) {
           // 客户端已断开,忽略
         }
       };
-      safeWrite('ready', { requestId });
+      safeWrite('ready', { requestId, contextCount: parsed.context.length });
       const stopHeartbeat = startHeartbeat(res);
 
       let answerChars = 0;
       let thinkingChars = 0;
       let sourcesCount = 0;
+      let proposalsCount = 0;
       const log = (extra: Record<string, unknown>) =>
         console.log(
           JSON.stringify({ ts: new Date().toISOString(), requestId, ...extra }),
@@ -347,6 +419,8 @@ export function createApp(deps: ServerDeps) {
         outcome = await runAgent({
           message: parsed.message,
           history,
+          context: parsed.context,
+          proposalPage,
           config,
           index,
           signal: abortController.signal,
@@ -370,6 +444,13 @@ export function createApp(deps: ServerDeps) {
               });
             },
             onStderr: (line) => log({ event: 'sdk_stderr', line: line.slice(0, 500) }),
+            /* 一条待确认的批注建议。这一帧只是把它摆到用户面前 —— 写入由页面在
+               用户点采纳之后、用他自己的会话完成,本服务不持有任何批注凭据。 */
+            onProposal: (proposal) => {
+              proposalsCount++;
+              safeWrite('proposal', proposal);
+              log({ event: 'proposal', id: proposal.id, page: proposal.page, scope: proposal.scope, visibility: proposal.visibility });
+            },
           },
         });
       } finally {
@@ -404,7 +485,7 @@ export function createApp(deps: ServerDeps) {
             durationMs: outcome.durationMs,
             numTurns: outcome.numTurns,
           });
-          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, dailyLeftUsd: budget.remainingUsd });
+          log({ event: 'done', ok: true, costUsd: outcome.costUsd, durationMs: outcome.durationMs, numTurns: outcome.numTurns, answerChars, thinkingChars, sourcesCount, proposalsCount, contextCount: parsed.context.length, dailyLeftUsd: budget.remainingUsd });
         } else if (timedOut) {
           // 墙钟超时:与客户端断连区分,给客户端明确的 error 帧
           safeWrite('error', { code: 'internal', message: '处理超时,请稍后重试' });
