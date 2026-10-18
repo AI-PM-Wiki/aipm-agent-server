@@ -20,6 +20,7 @@ import { runAgent } from './agent.ts';
 import type { AgentErrorCode, AgentOutcome } from './agent.ts';
 import { CHART_KINDS, CONTEXT_LIMITS, CONTEXT_MAX_ITEMS, RASTER_MEDIA_TYPES, contextItemProblem } from './context.ts';
 import { truncateHistory } from './history.ts';
+import { annotationPageFromPath } from './annotation-reader.ts';
 import { SlidingWindowLimiter, Semaphore, SemaphoreError, hashIp } from './rate-limit.ts';
 import { DailyBudget } from './budget.ts';
 import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
@@ -114,6 +115,7 @@ export function createApp(deps: ServerDeps) {
     const headers: Record<string, string> = { Vary: 'Origin' };
     if (origin !== undefined && config.allowedOrigins.includes(origin)) {
       headers['Access-Control-Allow-Origin'] = origin;
+      headers['Access-Control-Expose-Headers'] = 'Retry-After';
     }
     return headers;
   }
@@ -368,6 +370,16 @@ export function createApp(deps: ServerDeps) {
         return;
       }
 
+      const rawAnnotationToken = req.headers['x-aipm-annotation-token'];
+      if (rawAnnotationToken !== undefined &&
+          (typeof rawAnnotationToken !== 'string' || rawAnnotationToken.length === 0 ||
+            rawAnnotationToken.length > 512)) {
+        budget.release(estimate);
+        sendError(req, res, 400, 'bad_request', '批注会话请求头格式不正确', corsHeaders);
+        return;
+      }
+      const annotationToken = rawAnnotationToken ?? null;
+
       const proposalPage = resolveRequestPage(parsed.page, parsed.context, index, config.siteBase);
       if (proposalPage === INDEX_UNAVAILABLE) {
         budget.release(estimate);
@@ -421,6 +433,8 @@ export function createApp(deps: ServerDeps) {
           history,
           context: parsed.context,
           proposalPage,
+          annotationPage: annotationPageFromPath(proposalPage ?? undefined, config.siteBase),
+          annotationToken,
           config,
           index,
           signal: abortController.signal,
@@ -524,7 +538,7 @@ export function createApp(deps: ServerDeps) {
       if (req.headers.origin !== undefined) {
         headers['Access-Control-Allow-Origin'] = req.headers.origin;
         headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS';
-        headers['Access-Control-Allow-Headers'] = 'Content-Type';
+        headers['Access-Control-Allow-Headers'] = 'Content-Type, X-AIPM-Annotation-Token';
         headers['Access-Control-Max-Age'] = '86400';
       }
       res.writeHead(204, headers);

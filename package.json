@@ -18,7 +18,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "image-check": "tsx src/image-model-check.ts",
     "proposal-check": "tsx src/proposal-check.ts",
-    "page-index-check": "tsx src/page-index-http-check.ts"
+    "page-index-check": "tsx src/page-index-http-check.ts",
+    "check:annotation-read": "tsx src/annotation-reader-check.ts",
+    "check:retry-after": "tsx src/retry-after-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.241",

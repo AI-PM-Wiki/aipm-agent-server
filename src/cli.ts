@@ -28,13 +28,19 @@ function parseArgs(argv: string[]): { mode: 'run' | 'check-config'; prompt: stri
 }
 
 function checkConfig(): number {
-  const config = loadConfig({ ...process.env, ANTHROPIC_API_KEY: 'test-key' });
+  const config = loadConfig({
+    ANTHROPIC_API_KEY: 'test-key',
+    ANNOTATION_API_KEY: 'service-key-sentinel',
+    SCRATCH_DIR: process.cwd(),
+  });
   const index = WikiIndex.fromDocs([
     { location: 'ai/', title: 'AI 基础', text: 'RAG 知识库问答 RAG 评估' },
   ]);
-  const { options } = buildAgentOptions({
+  const { options, prompt: configuredPrompt } = buildAgentOptions({
     config,
     index,
+    annotationPage: '/ai/rag/',
+    annotationToken: 'credential-sentinel',
     callbacks: { onDelta: () => {}, onThinking: () => {}, onSources: () => {} },
   });
   const checks: Array<[string, boolean]> = [
@@ -51,6 +57,8 @@ function checkConfig(): number {
     ['effort 生效', options.effort === config.effort],
     ['model 生效', options.model === config.model],
     ['系统提示词含检索流程约束', SYSTEM_PROMPT.includes('search_wiki') && SYSTEM_PROMPT.includes('read_wiki_page')],
+    ['批注服务凭据只配置在服务端且不进入 prompt', config.annotationApiKey === 'service-key-sentinel' && !String(configuredPrompt).includes('service-key-sentinel')],
+    ['用户会话凭据不进入 prompt', !String(configuredPrompt).includes('credential-sentinel')],
   ];
   let failed = 0;
   for (const [name, ok] of checks) {
