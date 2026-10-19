@@ -33,7 +33,7 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
     (df 占比 0.29~0.35)按「有区分度单字」保留;但构成单字虽高频、自身却极稀见
     (df≤10 篇文档)的二字 token 视为专名/特有短语候选(实测「会计」df=4 曾被
     误删,查询只剩单字「会」),无条件保留。全部被剔除时回退原 token。
-- 工具面:`tools: []` 禁用全部内置工具,只剩 `mcp__wiki__search_wiki` / `mcp__wiki__read_wiki_page`;
+- 工具面：`tools: []` 禁用内置工具，使用 `mcp__wiki__*` 提供站内检索、文章读取、批注讨论、批注建议与文章阅读视图；
   `disallowedTools` 列 9 项内置工具纵深防御;`strictMcpConfig` + `settingSources: []` 隔离宿主配置。
 - SDK 子进程工作目录指向空 scratch 目录(`SCRATCH_DIR`),`persistSession: false`。
 
@@ -71,9 +71,13 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 
 缓存目录为 `SUMMARY_CACHE_DIR`，缺省 `./data/summaries`；Docker Compose 使用 `summary-data` 持久卷，重新部署保留结果。文章、模型或生成规则版本变化会产生新记录。缓存命中直接读取已有结果，不占用模型预算。多实例部署需要共享缓存目录，同时配置集中管理的预算与限流；当前预算和限流保存在单个进程中。
 
-前端 `window.__aipmSummary.createView({host, navigate, continueChat?})` 提供独立展示组件，支持 `setLoading()`、`setData(summary)`、`setError(message, retry?)` 和 `dispose()`。页头面板和助手消息共同使用该组件。`navigate` 接收文章路径及章节锚点；省略 `continueChat` 时作为静态总结展示。思维导图使用 Mermaid，AI 生成的文字通过文本节点展示。
+前端 `window.__aipmSummary.createView({host, navigate, continueChat?, view?, onViewChange?})` 提供独立展示组件，支持 `setLoading()`、`setData(summary)`、`setError(message, retry?)`、`selectView(view)` 和 `dispose()`。`view` 为 `mindmap` 或 `reading`，`onViewChange` 接收当前视图。页头面板和助手消息共同使用该组件。`navigate` 接收文章路径及章节锚点；`continueChat(summary, {view, index?})` 接收全文讨论或指定主题的选择。思维导图使用 Mermaid，AI 生成的文字通过文本节点展示。
 
 继续讨论时，`POST /api/chat` 可以附带 `summaryRevision`。服务端核对当前文章和版本号，从共享缓存读取完整总结作为模型语境；文章或模型已经变化、缓存不可用时返回 409 `summary_stale`。这条通路直接复用已有总结。
+
+`show_article_summary({view})` 将当前文章的思维导图或 AI 精读展示在助手回答中，并把完整总结返回模型。文章由请求绑定，缓存与页头 AI 总结面板共用；首次使用时生成总结。问答与总结分别使用受并发上限约束的队列，共享每日预算。前端保存总结、选中视图与回答文本，刷新后恢复。重复讨论同一份总结时复用已有卡片。
+
+每个主题的「讨论这个主题」按钮将对应内容加入 `kind: "summary"` 语境。再次选择同一主题会更新已有条目；发送后清空输入区域中的语境，历史消息保留所选内容，供后续查看与重新生成。页面导航时只保留当前文章的待发送语境。
 
 真实模型及浏览器验收入口见主仓库 `test/browser/article_summary_stack.py` 与 `check_article_summary_ego.mjs`，需要配置已授权的 `AIPM_REAL_MODEL_*` 环境变量。
 
@@ -104,6 +108,7 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 |---|---|---|
 | `ready` | `{requestId, contextCount}` | 流打开 |
 | `sources` | `{query, results:[{title,url,snippet}]}` | 每次 search_wiki 返回 |
+| `summary` | `{summary: ArticleSummary, view: "mindmap" \| "reading"}` | 每次 show_article_summary 返回 |
 | `delta` | `{text}` 增量 | 回答 token 块 |
 | `done` | `{usage, costUsd, durationMs, numTurns}` | 终帧后关闭 |
 | `error` | `{code: budget_exceeded\|max_turns\|model_error\|image_unsupported\|internal, message}` | 随后关闭 |
@@ -126,13 +131,14 @@ SSE 协议(事件流,15s 心跳注释行 `: ping`):
 }
 ```
 
-按 `kind` 分三支,`chart` 与 `source` 只有图表用得上:
+各类语境使用以下字段：
 
 | `kind` | 必填 | 说明 |
 |---|---|---|
 | `selection` | `quote` | 正文里划的一段原文 |
 | `annotation` | `quote` 或 `body` 至少一段 | 批注面板里的一条批注;全页评论只有 `body` |
 | `chart` | `chart`(取值 `mermaid` / `svg` / `image`)与 `source` | 正文里的一张图 |
+| `summary` | `source` | 用户选择的总结主题，包含主题名称、章节锚点与生成内容；模型需要结合原文核对 |
 
 `source` 是**前端取好的文字**,不是图的地址:mermaid 是它的源码,SVG 是图里写的字,
 位图是作者写的替代文本。取不到时前端写一句说明(第几张、什么图、为什么没有),

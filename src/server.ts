@@ -42,7 +42,7 @@ import { initSseResponse, startHeartbeat, writeSseEvent } from './sse.ts';
  */
 const ContextItemSchema = z
   .object({
-    kind: z.enum(['selection', 'annotation', 'chart']),
+    kind: z.enum(['selection', 'annotation', 'chart', 'summary']),
     page: z.string().min(1).max(CONTEXT_LIMITS.page),
     title: z.string().max(CONTEXT_LIMITS.title).default(''),
     quote: z.string().max(CONTEXT_LIMITS.quote).default(''),
@@ -101,7 +101,11 @@ export function createApp(deps: ServerDeps) {
     waitMs: config.queueWaitMs,
   });
   const budget = new DailyBudget(config.dailyBudgetUsd);
-  const summaries = new ArticleSummaryService(config, budget, semaphore);
+  // 问答工具执行期间已经持有并发名额，总结生成使用独立队列。
+  const summaries = new ArticleSummaryService(config, budget, new Semaphore(config.concurrencyLimit, {
+    queueLimit: config.queueLimit,
+    waitMs: config.queueWaitMs,
+  }));
   const startedAt = Date.now();
 
   function originAllowed(origin: string | undefined): boolean {
@@ -367,7 +371,7 @@ export function createApp(deps: ServerDeps) {
           'bad_request',
           '请求体格式不正确:需要 {message, history?, context?};' +
             'context 里每条要有 kind 与 page,划选必须有原文,批注的原文与正文' +
-            '至少要有一段,图表要有种类与取到的文字,可见范围只接受 public / private;' +
+            '至少要有一段,图表要有种类与取到的文字,总结主题必须有 source,可见范围只接受 public / private;' +
             '位图的 mediaType 与 imageData 要么都给要么都不给,类型限于 PNG / JPEG / WebP / GIF',
           corsHeaders,
         );
@@ -451,6 +455,7 @@ export function createApp(deps: ServerDeps) {
           proposalPage,
           annotationPage: annotationPageFromPath(proposalPage ?? undefined, config.siteBase),
           annotationToken,
+          summaries,
           config,
           index,
           signal: abortController.signal,
@@ -480,6 +485,10 @@ export function createApp(deps: ServerDeps) {
               proposalsCount++;
               safeWrite('proposal', proposal);
               log({ event: 'proposal', id: proposal.id, page: proposal.page, scope: proposal.scope, visibility: proposal.visibility });
+            },
+            onSummary: (event) => {
+              safeWrite('summary', event);
+              log({ event: 'summary', page: event.summary.page, revision: event.summary.revision, view: event.view });
             },
           },
         });

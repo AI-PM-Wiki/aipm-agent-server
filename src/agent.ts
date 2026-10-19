@@ -23,12 +23,12 @@ import { contextImages, renderContext } from './context.ts';
 import type { AnnotationProposal } from './annotation-proposal.ts';
 import { proposalPage } from './annotation-proposal.ts';
 import type { ChatTurn } from './history.ts';
-import type { SourcesEvent } from './tools.ts';
+import type { ArticleSummaryEvent, SourcesEvent } from './tools.ts';
 import { createWikiMcpServer, WIKI_MCP_INSTRUCTIONS } from './tools.ts';
 import { AnnotationReader } from './annotation-reader.ts';
 import { openSystemPromptAdapter } from './system-prompt-adapter.ts';
 import type { WikiIndex } from './search.ts';
-import type { ArticleSummary } from './article-summary.ts';
+import type { ArticleSummary, ArticleSummaryService } from './article-summary.ts';
 
 export type AgentErrorCode =
   | 'budget_exceeded'
@@ -47,6 +47,7 @@ export interface AgentCallbacks {
   /** 每次 propose_annotation 成型一条建议(SSE proposal)。它只是一条待确认的
       建议,写入由用户在页面上点采纳之后、用他自己的会话完成。 */
   onProposal?: (proposal: AnnotationProposal) => void;
+  onSummary?: (event: ArticleSummaryEvent) => void;
   /** init 消息携带的工具与 MCP 服务器清单(CLI 断言用) */
   onInit?: (info: { tools: string[]; mcpServers: { name: string; status: string }[]; model: string }) => void;
   onStderr?: (line: string) => void;
@@ -66,6 +67,7 @@ export interface AgentInput {
   message: string;
   history: ChatTurn[];
   summary?: ArticleSummary;
+  summaries?: ArticleSummaryService;
   /** 用户此刻正在读的东西(划选的一段原文 / 一条批注),可为空。 */
   context?: ContextItem[];
   /** 服务端核对过的本轮页面；null 表示旧请求没有提供页面。 */
@@ -101,6 +103,11 @@ export const SYSTEM_PROMPT = `你是 AI-PM Wiki(https://aipm.ac/)的文档问答
 - 不提可见范围时用缺省值(仅本机)。用户明确提到公开或私有时才写那一档;
 - 提完建议照常把结论讲清楚,但**不要说已经写好、已经高亮** —— 那是采纳之后才发生的事。
 
+文章阅读功能:
+- 用户要求思维导图、AI 精读、文章总结时，调用 mcp__wiki__show_article_summary，按需求选择 mindmap 或 reading；工具会在回答中展示可交互的阅读视图;
+- 工具绑定用户当前文章，返回的总结可以用于继续讨论，仍需读取原文核对事实;
+- 用户选择的总结主题通过语境提供，请围绕该主题回答。
+
 格式要求:
 - 用中文回答;全文不超过 400 字;先给结论,再展开说明;
 - Markdown 只允许使用:加粗、行内代码、列表、链接;不要使用标题与表格。`;
@@ -127,6 +134,7 @@ export interface BuildOptionsInput {
   message?: string;
   history?: ChatTurn[];
   summary?: ArticleSummary;
+  summaries?: ArticleSummaryService;
   context?: ContextItem[];
   proposalPage?: string | null;
   annotationPage?: string | null;
@@ -155,6 +163,9 @@ export function buildAgentOptions(
       /* 建议只针对服务端核对过的本轮页面；工具参数不接收目标页面。 */
       proposalPage: currentPage,
       onProposal: callbacks.onProposal,
+      summaries: input.summaries,
+      onSummary: callbacks.onSummary,
+      signal: abortController.signal,
       annotationReader: input.annotationPage === undefined || input.annotationPage === null
         ? null
         : new AnnotationReader({

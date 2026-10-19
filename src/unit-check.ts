@@ -344,8 +344,8 @@ await index.load();
   check('语境: 图表不走引文与批注那两行', !mermaid.includes('原文:') && !mermaid.includes('批注正文:'));
 
   const svg = renderContext([{ ...chart, chart: 'svg', source: '入库侧 / 查询处理 / 重排' }], 'https://aipm.ac');
-  check('语境: SVG 图标出图里的文字', svg.includes('图类型: SVG 图') && svg.includes('图里的文字: 入库侧'));
-  check('语境: SVG 那行说明图形本身没有送过来', svg.includes('图形本身没有送过来'));
+  check('语境: SVG 图标明文本来源', svg.includes('图类型: SVG 图') && svg.includes('SVG 文本语境: 入库侧'));
+  check('语境: SVG 文本说明图像状态', svg.includes('未附带位图'));
 
   const image = renderContext([{ ...chart, chart: 'image', source: '页面上的第 1 张图(位图, 作者没有写替代文本)。' }], 'https://aipm.ac');
   check('语境: 位图标出说明', image.includes('图类型: 位图') && image.includes('说明: 页面上的第 1 张图'));
