@@ -31,6 +31,7 @@ export interface Config {
   apiKey: string;
   dailyBudgetUsd: number;
   bodyLimitBytes: number;
+  upstreamBodyLimitBytes: number;
   bodyTimeoutMs: number;
   maxRunMs: number;
   trustProxy: boolean;
@@ -84,6 +85,7 @@ const EnvSchema = z.object({
   // 4 MiB 刚好容下最坏的一轮,同时仍是读取超时(BODY_TIMEOUT_MS)与并发槽位之下
   // 的一道硬边界 —— 慢速 POST 拖不满它就先被超时断开。
   BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(4_194_304),
+  UPSTREAM_BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).default(4_194_304),
   // 请求体读取超时(ms):慢速 POST 拖住并发槽位的 DoS 兜底,超时断开并释放槽位。
   BODY_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
   // 单轮问答墙钟上限(ms):到点强制 abort(与客户端断连同一中止路径),防 agent 挂死。
@@ -145,6 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiKey: e.API_KEY,
     dailyBudgetUsd: e.DAILY_BUDGET_USD,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
+    upstreamBodyLimitBytes: e.UPSTREAM_BODY_LIMIT_BYTES,
     bodyTimeoutMs: e.BODY_TIMEOUT_MS,
     maxRunMs: e.MAX_RUN_MS,
     trustProxy: parseBool(e.TRUST_PROXY),
