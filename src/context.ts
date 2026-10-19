@@ -54,9 +54,8 @@ export const RASTER_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'ima
 export type RasterMediaType = (typeof RASTER_MEDIA_TYPES)[number];
 
 export interface ContextItem {
-  /** selection = 正文里划的一段话;annotation = 批注面板里的一条批注;
-      chart = 正文里的一张图。 */
-  kind: 'selection' | 'annotation' | 'chart';
+  /** selection = 正文选区；annotation = 批注；chart = 正文图表；summary = 总结主题。 */
+  kind: 'selection' | 'annotation' | 'chart' | 'summary';
   /** 站内路径,如 `/ai/rag/`。 */
   page: string;
   title: string;
@@ -71,7 +70,7 @@ export interface ContextItem {
   color: string;
   /** chart 专有:图的种类。其余 kind 是空串。 */
   chart: ChartKind | '';
-  /** chart 专有:从这张图里取到的文字。 */
+  /** chart 与 summary 使用：图表文字或所选总结主题内容。 */
   source: string;
   /** chart 专有:位图的媒体类型与 base64 图像内容。两者**同给同空** —— 图取不到
       (跨域、类型不对、太大)时只有上面那段文字,此时两者都是空串。 */
@@ -84,6 +83,7 @@ const KIND_LABEL: Record<ContextItem['kind'], string> = {
   selection: '用户划选的原文',
   annotation: '批注面板里的一条批注',
   chart: '用户正在读的一张图',
+  summary: '用户选择的 AI 总结主题',
 };
 
 /** 图表的类型行。带上「这边有什么、没有什么」——模型看不到图,得知道自己手里
@@ -126,6 +126,9 @@ const CHART_TEXT_LABEL: Record<ChartKind, string> = {
  * 放在这里,渲染函数因此可以假定该有的字段不会缺席。
  */
 export function contextItemProblem(item: ContextItem): string | null {
+  if (item.kind === 'summary') {
+    return item.source.trim() ? null : 'summary 语境必须包含所选主题内容';
+  }
   if (item.kind === 'chart') {
     if (!(CHART_KINDS as readonly string[]).includes(item.chart)) {
       return `chart 语境必须有 chart,取值限于 ${CHART_KINDS.join(' / ')}`;
@@ -177,6 +180,10 @@ function renderItem(
   const lines = [`[语境 ${index} · ${KIND_LABEL[item.kind]}]`];
   const title = item.title.trim();
   lines.push(`页面: ${title.length > 0 ? `${title} — ` : ''}${pageUrl(siteBase, item.page)}`);
+  if (item.kind === 'summary') {
+    lines.push('以下为 AI 生成的总结主题，请结合原文核对。', item.source);
+    return lines.join('\n');
+  }
   if (item.kind === 'chart') {
     const chart = item.chart as ChartKind;
     lines.push(`图类型: ${chartTypeLine(item)}`);
