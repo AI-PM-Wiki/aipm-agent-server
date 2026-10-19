@@ -399,7 +399,7 @@ export async function runAgent(input: AgentInput): Promise<AgentOutcome> {
       adapter = await openSystemPromptAdapter({
         upstream: config.anthropicBaseUrl, apiKey: config.anthropicApiKey, model: config.model,
         productPrompt: SYSTEM_PROMPT, signal: options.abortController!.signal,
-        maxBodyBytes: config.bodyLimitBytes, mcpInstructions: () => mcpInstructions,
+        maxBodyBytes: config.upstreamBodyLimitBytes, mcpInstructions: () => mcpInstructions,
       });
       options.env = { ...process.env, ANTHROPIC_BASE_URL: adapter.baseUrl,
         ANTHROPIC_API_KEY: adapter.apiKey, ANTHROPIC_AUTH_TOKEN: undefined };

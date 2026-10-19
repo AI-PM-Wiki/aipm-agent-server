@@ -55,7 +55,8 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 | `QUEUE_LIMIT` / `QUEUE_WAIT_MS` | 并发满时排队深度(默认 10)与等待上限(默认 60s),超限 503 + Retry-After |
 | `API_KEY` | **无 Origin 请求**(curl/脚本/爬虫)须携带 `X-API-Key` 头,否则 401;留空 = 不校验。浏览器请求由 Origin 白名单覆盖,不受此限。局限:curl 可伪造 Origin 头绕过,本层防无差别扫描,针对性攻击由日预算兜底 |
 | `DAILY_BUDGET_USD` | 每日预算护栏(USD,按 SDK `total_cost_usd` 累计,UTC 日切,进程内状态,重启清零):耗尽后全局拒绝 429 `budget_exhausted`「今日问答预算已用完,请明天再试」,次日自动恢复;`0` = 关闭。请求先原子预占单轮上限(`MAX_BUDGET_USD`)，已知费用按实际值结算，明确零费用释放预占；取消、超时或异常导致费用未知时保留预占，直到取得可信用量或现有日切／进程重启。执行前拒绝的请求释放预占。默认 `1.4` ≈ ¥10/天(以实际账单为准可调) |
-| `BODY_LIMIT_BYTES` / `BODY_TIMEOUT_MS` | 请求体上限(默认 64 KiB,超限 413)与读取超时(默认 15s,慢速 POST 防 DoS) |
+| `BODY_LIMIT_BYTES` / `BODY_TIMEOUT_MS` | 浏览器请求体上限(默认 4 MiB,超限 413)与读取超时(默认 15s,慢速 POST 防 DoS) |
+| `UPSTREAM_BODY_LIMIT_BYTES` | 提示词适配器的模型请求上限，缺省为 4 MiB，分别校验适配前与适配后的正文。模型请求包含历史、总结及工具结果，使用独立限制 |
 | `MAX_RUN_MS` | 单轮问答墙钟上限(默认 120s):到点强制中止(SSE `error` 帧,code `internal`),防 agent 挂死 |
 | `SCRATCH_DIR` | SDK 子进程工作目录(默认 `/tmp/aipm-agent-scratch`) |
 | `TRUST_PROXY` | 置 `true` **且直连来源属于 `TRUSTED_PROXY_IPS`(默认回环)** 时,才从 `Fly-Client-IP` / `cf-connecting-ip` 取客户端 IP;否则忽略转发头、回落 socket 地址。直连暴露(`HOST=0.0.0.0`)时不会信任任意来源的伪造转发头,每 IP 限流无法被绕过 |
@@ -80,6 +81,8 @@ POST /api/chat ──► server.ts (node:http 路由/CORS/限流/并发)
 每个主题的「讨论这个主题」按钮将对应内容加入 `kind: "summary"` 语境。再次选择同一主题会更新已有条目；发送后清空输入区域中的语境，历史消息保留所选内容，供后续查看与重新生成。页面导航时只保留当前文章的待发送语境。
 
 真实模型及浏览器验收入口见主仓库 `test/browser/article_summary_stack.py` 与 `check_article_summary_ego.mjs`，需要配置已授权的 `AIPM_REAL_MODEL_*` 环境变量。
+
+`npm run check:summary-followup -- <索引文件或 HTTPS URL> <真实总结文件> <检查工作目录> [模型环境文件]` 使用已生成的真实总结缓存、`in-history` 策略和 64 KiB 浏览器请求上限，验证模型调用精读工具后继续读取原文并完成回答。提供模型环境文件时读取 `AIPM_REAL_MODEL_*`，其余情况使用进程中的 `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL` 和 `MODEL`。
 
 ## 开发与运行
 

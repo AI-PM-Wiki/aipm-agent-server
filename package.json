@@ -22,7 +22,8 @@
     "check:annotation-read": "tsx src/annotation-reader-check.ts",
     "check:retry-after": "tsx src/retry-after-check.ts",
     "check:summary": "tsx src/summary-check.ts",
-    "check:summary-tools": "tsx src/summary-tool-check.ts"
+    "check:summary-tools": "tsx src/summary-tool-check.ts",
+    "check:summary-followup": "tsx src/summary-followup-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.241",
